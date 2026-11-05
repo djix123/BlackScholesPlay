@@ -78,3 +78,39 @@ Example:
 
     ./heston_calibrate gen surf.txt 100 0.05 0.01 0.04 2.0 0.05 0.3 -0.7
     ./heston_calibrate fit surf.txt 100 0.05 0.01 0.02 1.0 0.03 0.5 -0.3 3000
+
+## Testing
+
+Build both tools:
+
+    gcc -O2 -o black_scholes black_scholes.c -lm
+    gcc -O2 -o heston_calibrate heston_calibrate.c -lm
+
+Analytic vs Monte-Carlo (should agree within the reported standard error):
+
+    ./black_scholes 100 100 1 0.05 0 0.2 mc 1000000
+
+Variance mode: with a flat smile the model-free swap strike must equal
+`sigma^2`, and the MC implied variance must match the analytic Heston `E[V]`
+(0.04 here):
+
+    ./black_scholes var 100 1 0.05 0 0.2 0.04 0.04 2.0 0.04 0.3 -0.7 mc 1000000
+
+BS limit (`xi=0`, `v0=theta=sigma^2`): the variance call must approach
+`e^{-rT} max(sigma^2 - Kvar, 0)` = 0.009512:
+
+    ./black_scholes var 100 1 0.05 0 0.2 0.03 0.04 2.0 0.04 0.0 0.0 mc 200000
+
+Heston Fourier pricer in isolation (expect call ~10.2295, implied vol
+~0.2107; cross-checked against Heston Monte-Carlo to within its SE):
+
+    ./heston_calibrate price 100 100 1 0.05 0.01 0.04 2.0 0.05 0.3 -0.7
+
+Calibration round-trip with `surf.txt`, a synthetic 9x6 surface (relative
+strikes 0.70-1.30, tenors 1m-3y) generated under Heston with
+`v0=0.04 kappa=2 theta=0.05 xi=0.3 rho=-0.7` (S=100, r=0.05, q=0.02).
+Regenerate it, then verify the fit recovers those parameters from a
+perturbed start (expect RMSE ~1e-8 vol points):
+
+    ./heston_calibrate gen surf.txt 100 0.05 0.02 0.04 2.0 0.05 0.3 -0.7 9 6 0.7 1.3 0.0833333333 3.0
+    ./heston_calibrate fit surf.txt 100 0.05 0.02 0.02 1.0 0.03 0.5 -0.3 3000
