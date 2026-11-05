@@ -49,17 +49,29 @@ int black_scholes(bs_result *out, double S, double K, double T,
     if (!out || S <= 0.0 || K <= 0.0 || T < 0.0 || sigma < 0.0)
         return -1;
 
-    if (sigma == 0.0 || T == 0.0) {
-        double intrinsic = is_call ? fmax(S - K, 0.0) : fmax(K - S, 0.0);
-        double disc = exp(-r * T);
-        out->price = is_call ? S * exp(-q * T) - K * disc : K * disc - S * exp(-q * T);
-        if (out->price < intrinsic)
-            out->price = intrinsic;
+    if (T == 0.0) {
+        /* At expiry the value is intrinsic. */
+        out->price = is_call ? fmax(S - K, 0.0) : fmax(K - S, 0.0);
         out->delta = out->gamma = out->vega = out->theta = out->rho = 0.0;
         if (is_call && S > K)
-            out->delta = exp(-q * T);
+            out->delta = 1.0;
         if (!is_call && S < K)
-            out->delta = -exp(-q * T);
+            out->delta = -1.0;
+        return 0;
+    }
+    if (sigma == 0.0) {
+        /* Deterministic forward: the option is worth the discounted payoff at
+         * the forward, max(+-(S e^{-qT} - K e^{-rT}), 0). Intrinsic value
+         * S-K is NOT a valid floor for a European option when r or q != 0. */
+        double disc_q = exp(-q * T), disc_r = exp(-r * T);
+        double fwd_val = S * disc_q - K * disc_r; /* PV of (F - K) */
+        double sgn = is_call ? 1.0 : -1.0;
+        int itm = sgn * fwd_val > 0.0;
+        out->price = itm ? sgn * fwd_val : 0.0;
+        out->delta = itm ? sgn * disc_q : 0.0;
+        out->gamma = out->vega = 0.0;
+        out->theta = itm ? sgn * (q * S * disc_q - r * K * disc_r) : 0.0;
+        out->rho = itm ? sgn * K * T * disc_r : 0.0;
         return 0;
     }
 
@@ -217,7 +229,9 @@ static double heston_expected_variance(double v0, double kappa, double theta, do
  *   dS/S = (r-q) dt + sqrt(v) dW1
  *   dv   = kappa(theta - v) dt + xi sqrt(v) dW2,   dW1 dW2 = rho dt
  * Full-truncation Euler with N = round(252 T) steps (daily fixings).
- * Realized variance per path: V = (252/N) sum (ln S_i/S_{i-1})^2.
+ * Realized variance per path: V = (1/T) sum (ln S_i/S_{i-1})^2, i.e. annualized
+ * by the actual elapsed time so that E[V] matches the analytic Heston E[V]
+ * for any T (annualizing by 252/N would bias V when 252 T is not an integer).
  * Antithetic variates. Returns 0 on success, -1 on invalid input.
  */
 int heston_variance_mc(var_mc_result *out, double S, double T, double r, double q,
@@ -235,7 +249,7 @@ int heston_variance_mc(var_mc_result *out, double S, double T, double r, double 
     if (N < 1)
         N = 1;
     double dt = T / N;
-    double ann = 252.0 / (double)N;
+    double ann = 1.0 / T;
     double sdt = sqrt(dt);
     double disc = exp(-r * T);
     double sq1mr2 = sqrt(fmax(1.0 - rho * rho, 0.0));

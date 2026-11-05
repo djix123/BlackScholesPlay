@@ -326,10 +326,10 @@ static double nm_minimize(double (*f)(const double *, void *), void *ctx,
 
     for (int j = 0; j < n; j++)
         v[0][j] = x[j];
-    for (int i = 1; i < n; i++) {
+    for (int i = 1; i <= n; i++) {
         for (int j = 0; j < n; j++)
             v[i][j] = x[j];
-        v[i][i] += 0.25;
+        v[i][i - 1] += 0.25; /* vertex i perturbs coordinate i-1 */
     }
     for (int i = 0; i < np; i++)
         fv[i] = f(v[i], ctx);
@@ -445,6 +445,7 @@ static int usage(const char *prog)
             "  %s price S K T r q v0 kappa theta xi rho\n"
             "  %s gen OUTFILE S r q v0 kappa theta xi rho [ns nt kmin kmax tmin tmax]\n"
             "  %s fit SURFFILE S r q [v0 kappa theta xi rho] [maxiter]\n"
+            "      (the 5 start parameters are all-or-nothing; maxiter may follow either way)\n"
             "\n"
             "Surface file format ('#' comment lines allowed):\n"
             "  ns nt\n"
@@ -543,6 +544,10 @@ static int mode_fit(int argc, char **argv)
     const char *path = argv[2];
     double S = atof(argv[3]), r = atof(argv[4]), q = atof(argv[5]);
     double v0 = 0.04, kappa = 2.0, theta = 0.04, xi = 0.3, rho = -0.7;
+    int maxiter = 2000;
+    /* Accepted forms: SURFFILE S r q | ... maxiter | ... 5 params | ... 5 params maxiter */
+    if (argc != 6 && argc != 7 && argc != 11 && argc != 12)
+        return usage(argv[0]);
     if (argc >= 11) {
         v0 = atof(argv[6]);
         kappa = atof(argv[7]);
@@ -550,7 +555,10 @@ static int mode_fit(int argc, char **argv)
         xi = atof(argv[9]);
         rho = atof(argv[10]);
     }
-    int maxiter = argc >= 12 ? atoi(argv[11]) : 2000;
+    if (argc == 7)
+        maxiter = atoi(argv[6]);
+    else if (argc == 12)
+        maxiter = atoi(argv[11]);
     if (!params_ok(S, v0, kappa, theta, xi, rho) || maxiter < 1) {
         fprintf(stderr, "Invalid fit input: require S>0, v0>0, kappa>0, theta>0, xi>0, |rho|<1, maxiter>=1\n");
         return EXIT_FAILURE;
