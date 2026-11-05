@@ -481,8 +481,8 @@ typedef struct {
 } cal_ctx;
 
 /* Unconstrained x -> Heston params: positive params via exp, rho via tanh.
- * The exponents are clamped to the ranges below; a fit that ends on a bound
- * is reported by at_bound(). */
+ * The exponents are clamped to the ranges below; a fit that ends on a bound is
+ * reported by mode_fit(), which compares the final x against these bounds. */
 static const double X_LO[4] = {-14.0, -9.0, -14.0, -14.0};
 static const double X_HI[4] = {4.0, 4.0, 4.0, 3.0};
 
@@ -516,11 +516,14 @@ static double objective(const double *x, void *void_ctx)
 }
 
 /* Nelder-Mead simplex minimization over n variables. x is overwritten with
- * the best point; returns the objective there. */
+ * the best point; returns the objective there. *converged is set to 1 if the
+ * spread/diameter test below was met, and to 0 if the loop ran out the
+ * maxiter budget without meeting it. */
 static double nm_minimize(double (*f)(const double *, void *), void *ctx,
-                          double *x, int n, int maxiter)
+                          double *x, int n, int maxiter, int *converged)
 {
     int np = n + 1;
+    int converged_now = 0; /* set when the spread/diam test below is met */
     double **v = xmalloc((size_t)np * sizeof *v);
     double *fv = xmalloc((size_t)np * sizeof *fv);
     double *cen = xmalloc((size_t)n * sizeof *cen);
@@ -563,8 +566,10 @@ static double nm_minimize(double (*f)(const double *, void *), void *ctx,
                 if (d > diam)
                     diam = d;
             }
-        if (spread < 1e-15 && diam < 1e-10)
+        if (spread < 1e-15 && diam < 1e-10) {
+            converged_now = 1;
             break;
+        }
 
         for (int j = 0; j < n; j++) {
             double s = 0.0;
@@ -622,6 +627,8 @@ static double nm_minimize(double (*f)(const double *, void *), void *ctx,
             }
         }
     }
+
+    *converged = converged_now;
 
     /* v[0] is best after the last sort (or shrink keeps v[0] best) */
     int best = 0;
@@ -923,7 +930,8 @@ static int mode_fit(int argc, char **argv)
     };
     double *iv = xmalloc((size_t)npts * sizeof *iv);
     cal_ctx ctx = { &surf, S, r, q, iv };
-    double fval = nm_minimize(objective, &ctx, x, 5, (int)maxiter);
+    int converged = 0;
+    double fval = nm_minimize(objective, &ctx, x, 5, (int)maxiter, &converged);
 
     double v0f, kappaf, thetaf, xif, rhof;
     unpack(x, &v0f, &kappaf, &thetaf, &xif, &rhof);
@@ -937,6 +945,8 @@ static int mode_fit(int argc, char **argv)
     printf("v0=%.6f kappa=%.6f theta=%.6f xi=%.6f rho=%.6f\n",
            v0f, kappaf, thetaf, xif, rhof);
     print_feller(kappaf, thetaf, xif);
+    if (!converged)
+        printf("warning: stopped at maxiter=%ld without converging; increase maxiter\n", maxiter);
     for (int k = 0; k < 4; k++) {
         if (x[k] <= X_LO[k] || x[k] >= X_HI[k])
             printf("warning: %s ended on its search bound; the fit is not at an interior optimum\n",

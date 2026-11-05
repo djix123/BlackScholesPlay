@@ -238,6 +238,28 @@ b=$(BS_SEED=9 "$HC" mc 100 100 1 0.05 0.01 0.04 2 0.05 0.3 -0.7 2000)
 [ "$a" = "$b" ] && echo "PASS  BS_SEED reproduces heston_calibrate mc" ||
     { echo "FAIL  BS_SEED did not reproduce heston_calibrate mc"; fails=$((fails + 1)); }
 
+# ---- fit reports non-convergence --------------------------------------------
+# Running out the maxiter budget must be visible in the output (a truncated
+# Nelder-Mead run otherwise looks like a converged fit), and a fit that does
+# meet the convergence test must stay quiet. Exit status is 0 either way.
+out=$("$HC" fit surf.txt 100 0.05 0.02 0.02 1.0 0.03 0.5 -0.3 20); rc=$?
+check "fit at maxiter=20 still exits 0" "$rc" 0 0
+check "fit at maxiter=20 prints one such warning" \
+    "$(echo "$out" | grep -c 'stopped at maxiter')" 1 0
+if echo "$out" | grep -q 'warning: stopped at maxiter=20 without converging; increase maxiter'; then
+    echo "PASS  fit warns when it stops at maxiter=20"
+else
+    echo "FAIL  fit is silent when it stops at maxiter=20"; fails=$((fails + 1))
+fi
+# the same start does meet the convergence test by maxiter=3000 (it needs 294)
+out=$("$HC" fit surf.txt 100 0.05 0.02 0.02 1.0 0.03 0.5 -0.3 3000); rc=$?
+check "converged fit exits 0" "$rc" 0 0
+if echo "$out" | grep -q 'stopped at maxiter'; then
+    echo "FAIL  converged fit (maxiter=3000) warns anyway"; fails=$((fails + 1))
+else
+    echo "PASS  converged fit (maxiter=3000) does not warn"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; else echo "$fails check(s) FAILED."; fi
 [ "$fails" -eq 0 ]

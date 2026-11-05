@@ -109,7 +109,13 @@ Implementation notes:
   the wings. A model price outside the invertible range gives no vol: it is
   shown as `n/a`, penalised in the fit objective (not clamped), and makes
   `gen` refuse to write the surface.
-- `fit` warns if a parameter ends on its search bound.
+- `fit` warns if a parameter ends on its search bound. It also warns when
+  Nelder-Mead uses up `maxiter` before meeting its convergence test
+  (`warning: stopped at maxiter=<N> without converging; increase maxiter`);
+  the fit is still reported and the exit status stays 0. On `surf.txt` from
+  the start `0.02 1.0 0.03 0.5 -0.3` the test is first met on the 294th
+  iteration (`maxiter=294` is the smallest budget that converges), so
+  `maxiter=20` warns and `maxiter=3000` does not.
 - `ns = 1` (`nt = 1`) in `gen` uses `kmin` (`tmin`) only, so an explicit
   `kmax` (`tmax`) must equal it.
 - Surface files are validated: `1 <= ns, nt <= 10000`, `ns*nt <= 10^6`,
@@ -188,6 +194,10 @@ time-based seed; set `BS_SEED` to reproduce a run):
   vertex uninitialised and never perturb `v0`).
 - `fit` honours `maxiter` when given without start parameters, and rejects
   partial start-parameter lists and trailing arguments instead of ignoring them.
+- `fit` reports non-convergence: the same start on `surf.txt` warns at
+  `maxiter=20` (exactly one `stopped at maxiter=20 without converging` line)
+  and is silent once the budget is large enough to converge (`maxiter=3000`),
+  and it exits 0 in both cases.
 - The variance-swap strike equals `sigma^2` for large `sigma sqrt(T)`
   (`sigma=1, T=5` used to give 0.893 because the strike grid was cut at fixed
   multiples of the forward) and for small ones (`sigma=0.05, T=0.1`).
