@@ -1,8 +1,10 @@
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -11,6 +13,74 @@
 static double norm_cdf(double x)
 {
     return 0.5 * erfc(-x / sqrt(2.0));
+}
+
+/* Strict number parsing: the whole string must be a finite number. */
+static int parse_double(const char *s, double *out)
+{
+    char *end;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (end == s || *end != '\0' || errno == ERANGE || !isfinite(v))
+        return -1;
+    *out = v;
+    return 0;
+}
+
+static int parse_long(const char *s, long *out)
+{
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || errno == ERANGE)
+        return -1;
+    *out = v;
+    return 0;
+}
+
+/* Parse n numeric arguments argv[0..n-1] into out[]; names[] is for errors.
+ * Returns 0 on success, -1 (after printing a message) on the first bad one. */
+static int parse_args(char **argv, const char *const *names, int n, double *out)
+{
+    for (int i = 0; i < n; i++) {
+        if (parse_double(argv[i], &out[i]) != 0) {
+            fprintf(stderr, "Invalid number '%s' for %s\n", argv[i], names[i]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Seed drand48 once per process. Set BS_SEED=<unsigned integer> for a
+ * reproducible run; otherwise the seed mixes the time, pid and clock. */
+static void rng_seed_once(void)
+{
+    static int done = 0;
+    if (done)
+        return;
+    done = 1;
+
+    unsigned long long s = 0;
+    const char *env = getenv("BS_SEED");
+    int have = 0;
+    if (env && *env) {
+        char *end;
+        errno = 0;
+        s = strtoull(env, &end, 10);
+        if (*end == '\0' && errno != ERANGE)
+            have = 1;
+        else
+            fprintf(stderr, "Ignoring invalid BS_SEED '%s'\n", env);
+    }
+    if (!have)
+        s = (unsigned long long)time(NULL) ^
+            ((unsigned long long)getpid() << 20) ^ (unsigned long long)clock();
+    s *= 0x9E3779B97F4A7C15ULL; /* spread small seeds across all 48 bits */
+    s ^= s >> 29;
+    unsigned short seed[3] = {(unsigned short)(s & 0xffff),
+                              (unsigned short)((s >> 16) & 0xffff),
+                              (unsigned short)((s >> 32) & 0xffff)};
+    seed48(seed);
 }
 
 typedef struct {
@@ -115,8 +185,7 @@ int black_scholes_mc(mc_result *out, double S, double K, double T,
     if (!out || S <= 0.0 || K <= 0.0 || T < 0.0 || sigma < 0.0 || paths <= 0)
         return -1;
 
-    unsigned short seed[3] = {0x1234, 0x5678, (unsigned short)(time(NULL) & 0xffff)};
-    seed48(seed);
+    rng_seed_once();
 
     double drift = (r - q - 0.5 * sigma * sigma) * T;
     double vol = sigma * sqrt(T);
@@ -185,7 +254,11 @@ static double flat_smile(double K, void *ctx)
  * swap, statically replicated from OTM vanillas (Carr-Madan):
  *   K_var = (2/T) e^{rT} [ int_0^F P(K)/K^2 dK + int_F^inf C(K)/K^2 dK ],
  *   F = S e^{(r-q)T}.
- * Integrates on a log-spaced strike grid, trapezoidal in ln K.
+ * Integrates on a log-spaced strike grid, trapezoidal in ln K. The grid is
+ * centred on ln F with half-width max(8 s, 4), s = smile(F) sqrt(T), so the
+ * wings are covered (to ~e^-32 in Gaussian tail mass) even for large vol*sqrt(T)
+ * rather than being cut at fixed multiples of F. The spacing is kept <= 0.001
+ * in ln K and <= s/100 (n_points is only a minimum), with F on the grid.
  * Returns 0 on success, -1 on invalid input.
  */
 int variance_swap_strike(double *out, double S, double T, double r, double q,
@@ -196,7 +269,20 @@ int variance_swap_strike(double *out, double S, double T, double r, double q,
         return -1;
 
     double F = S * exp((r - q) * T);
-    double lmin = log(0.02 * F), lmax = log(5.0 * F);
+    double s0 = smile(F, smile_ctx) * sqrt(T);
+    if (!(s0 >= 0.0) || !isfinite(s0))
+        return -1;
+    double half = fmax(8.0 * s0, 4.0);
+    double lmin = log(F) - half, lmax = log(F) + half;
+    /* Spacing: <= 0.001 and <= s/100 so the kink where the integrand switches
+     * from puts to calls at K = F is resolved. n is forced odd so that F is
+     * itself a grid point. */
+    double dx_max = fmin(0.001, fmax(s0 / 100.0, 1e-4));
+    int n_min = (int)ceil(2.0 * half / dx_max) + 1;
+    if (n_points < n_min)
+        n_points = n_min;
+    if (n_points % 2 == 0)
+        n_points++;
     double dx = (lmax - lmin) / (n_points - 1);
 
     double integral = 0.0, prev = 0.0;
@@ -242,8 +328,7 @@ int heston_variance_mc(var_mc_result *out, double S, double T, double r, double 
         kappa <= 0.0 || theta < 0.0 || xi < 0.0 || fabs(rho) > 1.0 || paths <= 0)
         return -1;
 
-    unsigned short seed[3] = {0x1234, 0x5678, (unsigned short)(time(NULL) & 0xffff)};
-    seed48(seed);
+    rng_seed_once();
 
     int N = (int)(252.0 * T + 0.5);
     if (N < 1)
@@ -320,32 +405,40 @@ int heston_variance_mc(var_mc_result *out, double S, double T, double r, double 
 
 /* Variance mode:
  *   var S T r q sigma Kvar v0 kappa theta xi rho [mc PATHS]
+ * argv[0] is "var"; prog is the program name (for messages).
  */
-static int main_variance(int argc, char **argv)
+static int main_variance(const char *prog, int argc, char **argv)
 {
     int run_mc = 0;
     long paths = 0;
 
     if (argc == 14 && strcmp(argv[12], "mc") == 0) {
         run_mc = 1;
-        paths = atol(argv[13]);
+        if (parse_long(argv[13], &paths) != 0) {
+            fprintf(stderr, "Invalid PATHS '%s'\n", argv[13]);
+            return EXIT_FAILURE;
+        }
     } else if (argc != 12) {
         fprintf(stderr,
-                "Usage: %s S T r q sigma Kvar v0 kappa theta xi rho [mc PATHS]\n"
+                "Usage: %s var S T r q sigma Kvar v0 kappa theta xi rho [mc PATHS]\n"
                 "  S: spot, T: years to expiry, r: risk-free rate, q: dividend yield\n"
                 "  sigma: flat vol for the model-free variance-swap replication\n"
                 "  Kvar: variance strike (annualized variance, e.g. 0.04 = 20%% vol)\n"
                 "  v0: initial variance, kappa: mean-reversion speed, theta: long-run variance\n"
                 "  xi: vol of vol, rho: corr(S,v) in [-1,1]\n"
-                "  optional 'mc PATHS': also price variance options by Monte-Carlo\n",
-                argv[0]);
+                "  optional 'mc PATHS': also price variance options by Monte-Carlo\n"
+                "  (set BS_SEED=<n> for a reproducible Monte-Carlo run)\n",
+                prog);
         return EXIT_FAILURE;
     }
 
-    double S = atof(argv[1]), T = atof(argv[2]), r = atof(argv[3]), q = atof(argv[4]);
-    double sigma = atof(argv[5]), Kvar = atof(argv[6]);
-    double v0 = atof(argv[7]), kappa = atof(argv[8]), theta = atof(argv[9]);
-    double xi = atof(argv[10]), rho = atof(argv[11]);
+    static const char *const names[11] = {"S", "T", "r", "q", "sigma", "Kvar",
+                                          "v0", "kappa", "theta", "xi", "rho"};
+    double a[11];
+    if (parse_args(argv + 1, names, 11, a) != 0)
+        return EXIT_FAILURE;
+    double S = a[0], T = a[1], r = a[2], q = a[3], sigma = a[4], Kvar = a[5];
+    double v0 = a[6], kappa = a[7], theta = a[8], xi = a[9], rho = a[10];
 
     if (S <= 0.0 || T <= 0.0 || sigma < 0.0 || Kvar < 0.0 || v0 < 0.0 ||
         kappa <= 0.0 || theta < 0.0 || xi < 0.0 || fabs(rho) > 1.0) {
@@ -368,8 +461,15 @@ static int main_variance(int argc, char **argv)
     double det_put = disc * fmax(Kvar - sigma * sigma, 0.0);
 
     printf("Variance mode  S=%.4f T=%.4f r=%.4f q=%.4f Kvar=%.4f\n", S, T, r, q, Kvar);
-    printf("Heston: v0=%.4f kappa=%.4f theta=%.4f xi=%.4f rho=%.4f\n\n",
+    printf("Heston: v0=%.4f kappa=%.4f theta=%.4f xi=%.4f rho=%.4f\n",
            v0, kappa, theta, xi, rho);
+    if (xi > 0.0) {
+        double feller = 2.0 * kappa * theta / (xi * xi);
+        printf("Feller ratio 2*kappa*theta/xi^2 = %.4f (%s)\n", feller,
+               feller >= 1.0 ? "satisfied: variance stays positive"
+                             : "violated: variance can hit zero; full truncation is used");
+    }
+    printf("\n");
     printf("Model-free variance swap strike (flat smile sigma=%.4f): %.6f  (sigma^2=%.6f)\n",
            sigma, swap_strike, sigma * sigma);
     printf("Heston expected annualized variance E[V]: %.6f\n", exp_var);
@@ -395,28 +495,37 @@ static int main_variance(int argc, char **argv)
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "var") == 0)
-        return main_variance(argc - 1, argv + 1);
+        return main_variance(argv[0], argc - 1, argv + 1);
 
     int run_mc = 0;
     long paths = 0;
 
     if (argc == 9 && strcmp(argv[7], "mc") == 0) {
         run_mc = 1;
-        paths = atol(argv[8]);
+        if (parse_long(argv[8], &paths) != 0) {
+            fprintf(stderr, "Invalid PATHS '%s'\n", argv[8]);
+            return EXIT_FAILURE;
+        }
     } else if (argc != 7) {
         fprintf(stderr,
                 "Usage: %s S K T r q sigma [mc PATHS]\n"
+                "       %s var S T r q sigma Kvar v0 kappa theta xi rho [mc PATHS]\n"
                 "  S: spot price, K: strike, T: years to expiry,\n"
                 "  r: risk-free rate, q: dividend yield, sigma: volatility,\n"
-                "  optional 'mc PATHS': also run Monte-Carlo with PATHS paths\n",
-                argv[0]);
+                "  optional 'mc PATHS': also run Monte-Carlo with PATHS paths\n"
+                "  (set BS_SEED=<n> for a reproducible Monte-Carlo run)\n"
+                "  Vega is per 1.00 of vol; theta and rho are per year.\n",
+                argv[0], argv[0]);
         return EXIT_FAILURE;
     }
 
-    bs_result call, put;
-    double S = atof(argv[1]), K = atof(argv[2]), T = atof(argv[3]);
-    double r = atof(argv[4]), q = atof(argv[5]), sigma = atof(argv[6]);
+    static const char *const names[6] = {"S", "K", "T", "r", "q", "sigma"};
+    double a[6];
+    if (parse_args(argv + 1, names, 6, a) != 0)
+        return EXIT_FAILURE;
+    double S = a[0], K = a[1], T = a[2], r = a[3], q = a[4], sigma = a[5];
 
+    bs_result call, put;
     if (black_scholes(&call, S, K, T, r, q, sigma, 1) != 0 ||
         black_scholes(&put, S, K, T, r, q, sigma, 0) != 0) {
         fprintf(stderr, "Invalid input: require S>0, K>0, T>=0, sigma>=0\n");

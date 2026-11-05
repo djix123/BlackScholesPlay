@@ -3,7 +3,7 @@
 # Usage: ./regress.sh        (builds into a temp dir; exits non-zero on failure)
 #
 # Monte-Carlo checks use 5-sigma tolerances so they are not flaky despite the
-# time-based seed.
+# time-based seed (set BS_SEED for reproducible runs).
 
 set -u
 cd "$(dirname "$0")" || exit 1
@@ -19,7 +19,7 @@ gcc -O2 -Wall -Wextra -o "$HC" heston_calibrate.c -lm || exit 1
 # check NAME VALUE EXPECTED TOL   (|VALUE-EXPECTED| <= TOL)
 check() {
     if awk -v v="$2" -v e="$3" -v t="$4" \
-        'BEGIN { if (v !~ /^-?[0-9.]+([eE][-+]?[0-9]+)?$/) exit 1; d = v - e; if (d < 0) d = -d; exit !(d <= t) }'; then
+        'BEGIN { if (v !~ /^[-+]?[0-9.]+([eE][-+]?[0-9]+)?$/) exit 1; d = v - e; if (d < 0) d = -d; exit !(d <= t) }'; then
         echo "PASS  $1 ($2)"
     else
         echo "FAIL  $1: got '$2', expected $3 +/- $4"
@@ -28,7 +28,7 @@ check() {
 }
 # check_lt NAME VALUE LIMIT       (VALUE < LIMIT)
 check_lt() {
-    if awk -v v="$2" -v l="$3" 'BEGIN { if (v !~ /^-?[0-9.]+([eE][-+]?[0-9]+)?$/) exit 1; exit !(v < l) }'; then
+    if awk -v v="$2" -v l="$3" 'BEGIN { if (v !~ /^[-+]?[0-9.]+([eE][-+]?[0-9]+)?$/) exit 1; exit !(v < l) }'; then
         echo "PASS  $1 ($2 < $3)"
     else
         echo "FAIL  $1: got '$2', expected < $3"
@@ -37,7 +37,7 @@ check_lt() {
 }
 # check_gt NAME VALUE LIMIT       (VALUE > LIMIT)
 check_gt() {
-    if awk -v v="$2" -v l="$3" 'BEGIN { if (v !~ /^-?[0-9.]+([eE][-+]?[0-9]+)?$/) exit 1; exit !(v > l) }'; then
+    if awk -v v="$2" -v l="$3" 'BEGIN { if (v !~ /^[-+]?[0-9.]+([eE][-+]?[0-9]+)?$/) exit 1; exit !(v > l) }'; then
         echo "PASS  $1 ($2 > $3)"
     else
         echo "FAIL  $1: got '$2', expected > $3"
@@ -145,6 +145,98 @@ check_gt "fit 5 params + maxiter=1 honoured" \
 check_fail "fit rejects 2 start params" "$HC" fit surf.txt 100 0.05 0.02 0.04 2.0
 check_fail "fit rejects 4 start params" "$HC" fit surf.txt 100 0.05 0.02 0.04 2.0 0.05 0.3
 check_fail "fit rejects extra args"     "$HC" fit surf.txt 100 0.05 0.02 0.04 2.0 0.05 0.3 -0.7 100 junk
+
+# ---- swap-strike grid covers the wings and resolves the K=F kink ------------
+# (the old fixed [0.02F, 5F] grid gave 0.893 for sigma=1, T=5)
+for case in "1.0 5 1" "2.0 10 4" "0.2 1 0.04" "0.05 0.1 0.0025" "0.3 0.02 0.09" "0.5 0.003 0.25"; do
+    set -- $case
+    v=$("$BS" var 100 "$2" 0.05 0.02 "$1" 0.04 0.04 2 0.04 0.3 -0.7 | awk '/swap strike/{print $8}')
+    check "swap strike sigma=$1 T=$2 equals sigma^2" "$v" "$3" "$(awk -v e="$3" 'BEGIN{print e*2e-4}')"
+done
+
+# ---- Heston quadrature adapts to the tenor ----------------------------------
+# Fixed 128-node/u_max=200 quadrature gave IV 0.1943 (3% off) at T=0.003.
+out=$("$HC" price 100 100 0.003 0.05 0.01 0.04 2.0 0.05 0.5 -0.7)
+check "Heston call, T=0.003"   "$(echo "$out" | awk '/^Call:/{print $2}')" 0.442926 2e-6
+check "Heston iv, T=0.003"     "$(echo "$out" | awk '/^Call:/{print $7}')" 0.199964 2e-6
+out=$("$HC" price 100 100 10 0.05 0.01 0.04 2.0 0.05 0.5 -0.7)
+check "Heston call, T=10"      "$(echo "$out" | awk '/^Call:/{print $2}')" 38.864187 2e-6
+
+# ---- independent check: Heston Monte-Carlo vs the Fourier pricer ------------
+for case in "100 100 1 0.04 2.0 0.05 0.3 -0.7" "100 120 0.25 0.04 2.0 0.05 0.5 -0.7"; do
+    set -- $case
+    out=$("$HC" mc "$1" "$2" "$3" 0.05 0.01 "$4" "$5" "$6" "$7" "$8" 300000)
+    check "Heston MC call vs Fourier K=$2 T=$3 (|diff| < 5 SE)" \
+          "$(echo "$out" | awk '/^Call:/{d=$8; if(d<0)d=-d; print d}')" 0 5
+    check "Heston MC put  vs Fourier K=$2 T=$3 (|diff| < 5 SE)" \
+          "$(echo "$out" | awk '/^Put:/{d=$8; if(d<0)d=-d; print d}')" 0 5
+done
+
+# ---- calibration quality (OTM inversion): round-trip RMSE ---------------------
+out=$("$HC" fit surf.txt 100 0.05 0.02 0.02 1.0 0.03 0.5 -0.3 3000)
+check_lt "fit RMSE (vol points)" "$(echo "$out" | awk '/^RMSE/{print $2}')" 1e-6
+if echo "$out" | grep -q 'n/a\|warning'; then
+    echo "FAIL  fit output has warnings / n/a on the committed surface"; fails=$((fails + 1))
+else
+    echo "PASS  fit output clean (no n/a, no warnings)"
+fi
+if echo "$out" | grep -q '^Feller ratio'; then echo "PASS  fit reports Feller ratio"
+else echo "FAIL  fit does not report Feller ratio"; fails=$((fails + 1)); fi
+if "$BS" var 100 1 0.05 0 0.2 0.04 0.04 2 0.04 0.3 -0.7 | grep -q '^Feller ratio'; then
+    echo "PASS  var mode reports Feller ratio"
+else echo "FAIL  var mode does not report Feller ratio"; fails=$((fails + 1)); fi
+
+# ---- surface file validation -------------------------------------------------
+printf '2 2\n0.9 1.1\n1 2\n0.2 0.2 0.2\n'      > "$TMP/trunc.txt"
+printf '1 1\n1.0\n1\n-0.2\n'                   > "$TMP/negvol.txt"
+printf '1 1\n1.0\n1\n0.2\n0.3\n'               > "$TMP/trail.txt"
+printf '1 1\n1.0\n1\nnan\n'                    > "$TMP/nan.txt"
+printf '1 1 # hdr\n1.0 # k\n1 # t\n0.2 # vol\n' > "$TMP/comments.txt"
+check_fail "surface: truncated file rejected"  "$HC" fit "$TMP/trunc.txt"  100 0.05 0.02
+check_fail "surface: negative vol rejected"    "$HC" fit "$TMP/negvol.txt" 100 0.05 0.02
+check_fail "surface: trailing data rejected"   "$HC" fit "$TMP/trail.txt"   100 0.05 0.02
+check_fail "surface: nan vol rejected"         "$HC" fit "$TMP/nan.txt"     100 0.05 0.02
+check_fail "surface: missing file rejected"    "$HC" fit "$TMP/nope.txt"    100 0.05 0.02
+if "$HC" fit "$TMP/comments.txt" 100 0.05 0.02 >/dev/null 2>&1; then
+    echo "PASS  surface: trailing comments accepted"
+else echo "FAIL  surface: trailing comments rejected"; fails=$((fails + 1)); fi
+
+# gen refuses (and writes nothing) when a point cannot be inverted
+rm -f "$TMP/bad.txt"
+check_fail "gen rejects non-invertible surface" \
+    "$HC" gen "$TMP/bad.txt" 100 0.05 0.02 0.04 2 0.05 0.3 -0.7 3 2 0.2 3.0 0.002 0.01
+[ ! -e "$TMP/bad.txt" ] && echo "PASS  gen wrote no file on failure" ||
+    { echo "FAIL  gen left a file behind"; fails=$((fails + 1)); }
+check_fail "gen rejects ns=1 with kmax != kmin" \
+    "$HC" gen "$TMP/bad.txt" 100 0.05 0.02 0.04 2 0.05 0.3 -0.7 1 3 0.9 1.1 0.5 1
+
+# ---- strict numeric parsing and usage text -----------------------------------
+check_fail "black_scholes rejects non-numeric r"      "$BS" 100 100 1 abc 0 0.2
+check_fail "black_scholes rejects trailing junk"      "$BS" 100 100 1x 0.05 0 0.2
+check_fail "black_scholes rejects non-numeric PATHS"  "$BS" 100 100 1 0.05 0 0.2 mc 10x
+check_fail "var rejects non-numeric v0"               "$BS" var 100 1 0.05 0 0.2 0.04 oops 2 0.04 0.3 -0.7
+check_fail "heston_calibrate price rejects non-numeric" "$HC" price 100 100 1 x 0.01 0.04 2 0.05 0.3 -0.7
+check_fail "heston_calibrate fit rejects bad maxiter"   "$HC" fit surf.txt 100 0.05 0.02 abc
+if "$BS" var 2>&1 | head -1 | grep -q "black_scholes var S T"; then
+    echo "PASS  var usage shows the program name"
+else echo "FAIL  var usage does not show the program name"; fails=$((fails + 1)); fi
+
+# ---- reproducible Monte-Carlo via BS_SEED -----------------------------------
+a=$(BS_SEED=42 "$BS" 100 100 1 0.05 0 0.2 mc 20000 | tail -2)
+b=$(BS_SEED=42 "$BS" 100 100 1 0.05 0 0.2 mc 20000 | tail -2)
+c=$(BS_SEED=43 "$BS" 100 100 1 0.05 0 0.2 mc 20000 | tail -2)
+[ "$a" = "$b" ] && echo "PASS  BS_SEED reproduces black_scholes mc" ||
+    { echo "FAIL  BS_SEED did not reproduce black_scholes mc"; fails=$((fails + 1)); }
+[ "$a" != "$c" ] && echo "PASS  different BS_SEED gives a different run" ||
+    { echo "FAIL  different BS_SEED gave the same run"; fails=$((fails + 1)); }
+a=$(BS_SEED=7 "$BS" var 100 1 0.05 0 0.2 0.04 0.04 2 0.04 0.3 -0.7 mc 5000 | tail -3)
+b=$(BS_SEED=7 "$BS" var 100 1 0.05 0 0.2 0.04 0.04 2 0.04 0.3 -0.7 mc 5000 | tail -3)
+[ "$a" = "$b" ] && echo "PASS  BS_SEED reproduces var mc" ||
+    { echo "FAIL  BS_SEED did not reproduce var mc"; fails=$((fails + 1)); }
+a=$(BS_SEED=9 "$HC" mc 100 100 1 0.05 0.01 0.04 2 0.05 0.3 -0.7 2000)
+b=$(BS_SEED=9 "$HC" mc 100 100 1 0.05 0.01 0.04 2 0.05 0.3 -0.7 2000)
+[ "$a" = "$b" ] && echo "PASS  BS_SEED reproduces heston_calibrate mc" ||
+    { echo "FAIL  BS_SEED did not reproduce heston_calibrate mc"; fails=$((fails + 1)); }
 
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; else echo "$fails check(s) FAILED."; fi
