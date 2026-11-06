@@ -135,7 +135,9 @@ Implementation notes:
   log-Euler step keeps `E[S_T] = F` for any step size, so such a gap is sampling
   error: with positive `rho` and high `xi` the paths miss the tail of `S_T` that
   carries the call's value, so the call and its SE are unreliable while the
-  put, which is bounded by the strike, stays usable.
+  put, which is bounded by the strike, stays usable. No warning does not prove
+  the call is right: a run that samples one huge path has a large SE that can
+  hide the gap (heavy-tailed test cases warned in 68-97% of seeds).
 - Implied vols are inverted from the out-of-the-money option (call for
   `K >= F`, otherwise the put via parity), which stays well conditioned in
   the wings. A model price outside the invertible range gives no vol: it is
