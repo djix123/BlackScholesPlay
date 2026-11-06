@@ -108,7 +108,17 @@ Implementation notes:
   `K >= F`, otherwise the put via parity), which stays well conditioned in
   the wings. A model price outside the invertible range gives no vol: it is
   shown as `n/a`, penalised in the fit objective (not clamped), and makes
-  `gen` refuse to write the surface.
+  `gen` refuse to write the surface. The Fourier integral is only accurate to
+  about `1e-13` of spot in absolute price, so an OTM price below
+  `PRICE_NOISE_FLOOR * S` (`1e-11` at `S = 100`) is quadrature noise rather
+  than a price: it is treated as non-invertible instead of being inverted, which
+  would otherwise report an arbitrary vol (the `K=75, T=0.01` put under the
+  example parameters is far below the floor, and the `~1e-14` the pricer
+  returned there used to invert to 0.384). The cut is on price, not
+  on moneyness or tenor: a genuinely tiny but resolved price still gives a vol
+  (at `K=110, T=0.01` the call is `1.0e-8` and gives 0.175461), while deeper
+  strikes at the same tenor give `n/a`. In the committed 9x6 surface the
+  smallest OTM price is about `2.5e-9`, comfortably above the floor.
 - `fit` warns if a parameter ends on its search bound.
 - `ns = 1` (`nt = 1`) in `gen` uses `kmin` (`tmin`) only, so an explicit
   `kmax` (`tmax`) must equal it.
@@ -159,6 +169,14 @@ vol 0.199964; a fixed cutoff of 200 gave 0.1943):
 
     ./heston_calibrate price 100 100 0.003 0.05 0.01 0.04 2.0 0.05 0.5 -0.7
 
+Deep OTM strikes whose true price is below the pricer's `1e-13` absolute noise
+print `n/a` instead of a vol invented from that noise (at `K=75` the pricer
+returns only `~1e-14` of noise); the `K=110` call is a resolved 1.0e-8 and keeps
+its vol:
+
+    ./heston_calibrate price 100 75 0.01 0.05 0.01 0.04 2 0.05 0.3 -0.7
+    ./heston_calibrate price 100 110 0.01 0.05 0.01 0.04 2 0.05 0.3 -0.7
+
 Calibration round-trip with `surf.txt`, a synthetic 9x6 surface (relative
 strikes 0.70-1.30, tenors 1m-3y) generated under Heston with
 `v0=0.04 kappa=2 theta=0.05 xi=0.3 rho=-0.7` (S=100, r=0.05, q=0.02).
@@ -196,6 +214,10 @@ time-based seed; set `BS_SEED` to reproduce a run):
   Heston Monte-Carlo (`heston_calibrate mc`) within 5 SE.
 - The committed `surf.txt` regenerates byte-for-byte and round-trips through
   `fit` with RMSE < 1e-6 vol points, with no `n/a` points or warnings.
+- A deep-OTM model price at or below the Fourier noise floor (`PRICE_NOISE_FLOOR
+  * S`) gives `n/a` rather than an implied vol inverted from quadrature noise,
+  while short-tenor points whose tiny prices are still resolved keep their vols,
+  and `gen` refuses a wing-heavy short-tenor grid.
 - Surface files with truncated, non-positive, non-finite or trailing data are
   rejected; `gen` refuses to write a surface with non-invertible points (and
   writes no file); non-numeric command-line arguments are rejected; the `var`
