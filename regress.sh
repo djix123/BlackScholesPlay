@@ -260,6 +260,45 @@ else
     echo "PASS  converged fit (maxiter=3000) does not warn"
 fi
 
+# ---- swap-strike grid: mean shift, no spacing floor, size caps ---------------
+# r = q = 0 (F = S): the strike is sigma^2 however large sigma sqrt(T) is. The
+# old grid was symmetric about ln F, so the put wing was cut at ln F - 8 s
+# instead of ln F - s^2/2 - 8 s (s = sigma sqrt(T)); sigma=2, T=100 gave 3.216.
+for case in "1.0 100 1" "2.0 25 4" "2.0 100 4" "3.0 100 9" "5.0 25 25"; do
+    set -- $case
+    v=$("$BS" var 100 "$2" 0 0 "$1" 0.04 0.04 2 0.04 0.3 -0.7 | awk '/swap strike/{print $8}')
+    check "swap strike sigma=$1 T=$2 (wing follows -s^2/2)" "$v" "$3" \
+          "$(awk -v e="$3" 'BEGIN{print e*1e-4}')"
+done
+# Tiny sigma sqrt(T): the old 1e-4 floor on the spacing left the kink at K = F
+# unresolved, so sigma=0.001, T=0.001 gave 0.000003 instead of 0.000001. The
+# strike of sigma=0.0001, T=0.01 is 1e-8, which prints as 0.000000 at 6
+# decimals; sigma=0.0316227766, T=1e-07 lands on the same grid (same
+# sigma sqrt(T) = 1e-5) at a scale where the printed digits bound the relative
+# error to 5e-4.
+for case in "0.05 0.003 0.0025" "0.01 0.001 0.0001" "0.001 0.001 0.000001" "0.0001 0.01 0.00000001"; do
+    set -- $case
+    v=$("$BS" var 100 "$2" 0.05 0.02 "$1" 0.04 0.04 2 0.04 0.3 -0.7 | awk '/swap strike/{print $8}')
+    check "swap strike sigma=$1 T=$2 (no spacing floor)" "$v" "$3" 1e-6
+done
+check "swap strike sigma=0.0316227766 T=1e-07 (same grid, scaled up)" \
+    "$("$BS" var 100 1e-07 0.05 0.02 0.0316227766 0.04 0.04 2 0.04 0.3 -0.7 | awk '/swap strike/{print $8}')" \
+    0.001 5e-7
+# A grid too large to integrate is refused with the error message rather than a
+# wrong number (the point count used to go through an int cast that overflowed
+# for sigma=1e5, T=1e4).
+check_fail "swap strike rejects sigma=10, T=100 (5.1e7 points)" \
+    "$BS" var 100 100 0 0 10 0.04 0.04 2 0.04 0.3 -0.7
+check_fail "swap strike rejects sigma=100000, T=10000" \
+    "$BS" var 100 10000 0 0 100000 0.04 0.04 2 0.04 0.3 -0.7
+if "$BS" var 100 100 0 0 10 0.04 0.04 2 0.04 0.3 -0.7 2>&1 >/dev/null |
+        grep -q "Failed to compute variance swap strike"; then
+    echo "PASS  oversized swap grid reports the Failed message"
+else
+    echo "FAIL  oversized swap grid does not report the Failed message"
+    fails=$((fails + 1))
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; else echo "$fails check(s) FAILED."; fi
 [ "$fails" -eq 0 ]

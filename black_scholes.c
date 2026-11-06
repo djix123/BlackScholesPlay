@@ -254,12 +254,20 @@ static double flat_smile(double K, void *ctx)
  * swap, statically replicated from OTM vanillas (Carr-Madan):
  *   K_var = (2/T) e^{rT} [ int_0^F P(K)/K^2 dK + int_F^inf C(K)/K^2 dK ],
  *   F = S e^{(r-q)T}.
- * Integrates on a log-spaced strike grid, trapezoidal in ln K. The grid is
- * centred on ln F with half-width max(8 s, 4), s = smile(F) sqrt(T), so the
- * wings are covered (to ~e^-32 in Gaussian tail mass) even for large vol*sqrt(T)
- * rather than being cut at fixed multiples of F. The spacing is kept <= 0.001
- * in ln K and <= s/100 (n_points is only a minimum), with F on the grid.
- * Returns 0 on success, -1 on invalid input.
+ * Integrates on a log-strike grid, trapezoidal in ln K. ln K is normal with
+ * mean ln F - s^2/2 and standard deviation s = smile(F) sqrt(T), so the grid
+ * is asymmetric: [ln F - s^2/2 - 8 s, ln F + 8 s]. That keeps both wings
+ * covered (to ~e^-32 of Gaussian tail mass) however large s gets; the strip
+ * is still widened to a half-width of 4 whenever the spacing makes that cheap.
+ * The puts (K < F) and the calls (K > F) are integrated as two separate
+ * segments, each with its own uniform spacing, so ln F is always an endpoint:
+ * the integrand has a kink there and trapezoid must not straddle it. Spacing
+ * is <= min(0.001, s/100) with no floor; n_points is only a minimum. With
+ * s = 0 the log-price is a point mass at F and the strike is exactly 0. The
+ * count is computed in double; it returns -1 when the grid would need more
+ * than VSS_MAX_POINTS points or when exp() of a grid limit would overflow or
+ * underflow.
+ * Returns 0 on success, -1 on invalid or unresolvable input.
  */
 int variance_swap_strike(double *out, double S, double T, double r, double q,
                          double (*smile)(double, void *), void *smile_ctx,
@@ -268,33 +276,77 @@ int variance_swap_strike(double *out, double S, double T, double r, double q,
     if (!out || !smile || S <= 0.0 || T <= 0.0 || n_points < 10)
         return -1;
 
-    double F = S * exp((r - q) * T);
+    /* Refuse grids this function could not integrate, and grid limits whose
+     * exponentials are not representable as doubles (exp() overflows or
+     * flushes to zero beyond about +-700 in its argument). */
+    const double VSS_MAX_POINTS = 5e7;   /* hard limit, far below INT_MAX */
+    const double VSS_WIDE_POINTS = 4e6;  /* budget for widening to +/-4 */
+    const double VSS_MAX_LOGK = 700.0;   /* max |ln K| on the grid */
+
+    double lF = log(S) + (r - q) * T;
+    if (!(isfinite(lF) && fabs(lF) <= VSS_MAX_LOGK))
+        return -1;
+    double F = exp(lF);
     double s0 = smile(F, smile_ctx) * sqrt(T);
     if (!(s0 >= 0.0) || !isfinite(s0))
         return -1;
-    double half = fmax(8.0 * s0, 4.0);
-    double lmin = log(F) - half, lmax = log(F) + half;
-    /* Spacing: <= 0.001 and <= s/100 so the kink where the integrand switches
-     * from puts to calls at K = F is resolved. n is forced odd so that F is
-     * itself a grid point. */
-    double dx_max = fmin(0.001, fmax(s0 / 100.0, 1e-4));
-    int n_min = (int)ceil(2.0 * half / dx_max) + 1;
-    if (n_points < n_min)
-        n_points = n_min;
-    if (n_points % 2 == 0)
-        n_points++;
-    double dx = (lmax - lmin) / (n_points - 1);
 
-    double integral = 0.0, prev = 0.0;
-    for (int i = 0; i < n_points; i++) {
-        double K = exp(lmin + i * dx);
-        bs_result res;
-        if (black_scholes(&res, S, K, T, r, q, smile(K, smile_ctx), K > F) != 0)
-            return -1;
-        double g = res.price / K; /* price/K^2 * dK, with dK = K dx */
-        if (i > 0)
-            integral += 0.5 * (prev + g) * dx;
-        prev = g;
+    if (s0 == 0.0) {
+        /* Zero-width grid: the log-price is a point mass at F, every OTM
+         * vanilla is worthless and the replication is exactly 0. Integrating
+         * a strip of arbitrary width instead would leave rounding noise of
+         * order 1e-19 from the two K = F endpoints. */
+        *out = 0.0;
+        return 0;
+    }
+    /* Asymmetric window around ln F, wide enough for the whole distribution. */
+    double lo_off = 0.5 * s0 * s0 + 8.0 * s0; /* ln F down to the put wing */
+    double hi_off = 8.0 * s0;                 /* ln F up to the call wing */
+    double dx_max = fmin(0.001, s0 / 100.0);
+    if (!(dx_max > 0.0) || !isfinite(dx_max))
+        return -1;
+
+    /* A half-width of at least 4 is kept only while the s/100 spacing makes it
+     * affordable; for tiny s it would cost tens of millions of points. */
+    if (hi_off < 4.0 && (fmax(lo_off, 4.0) + 4.0) / dx_max <= VSS_WIDE_POINTS) {
+        lo_off = fmax(lo_off, 4.0);
+        hi_off = 4.0;
+    }
+
+    double lmin = lF - lo_off, lmax = lF + hi_off;
+    if (!(lmin > -VSS_MAX_LOGK) || !(lmax < VSS_MAX_LOGK))
+        return -1;
+
+    double n_put = ceil(lo_off / dx_max) + 1.0;  /* points on [lmin, ln F] */
+    double n_call = ceil(hi_off / dx_max) + 1.0; /* points on [ln F, lmax] */
+    double n_total = n_put + n_call - 1.0;       /* ln F belongs to both wings */
+    if (!(n_total <= VSS_MAX_POINTS))
+        return -1;
+    if ((double)n_points < n_put)
+        n_points = (int)n_put;
+    if ((double)n_points < n_call)
+        n_points = (int)n_call;
+
+    /* Trapezoid in ln K over the two wings separately, each with its own
+     * uniform spacing and both reaching exactly K = F, where the integrand
+     * has a kink. */
+    double integral = 0.0;
+    for (int seg = 0; seg < 2; seg++) {
+        int is_call = seg;
+        double a = is_call ? lF : lmin, b = is_call ? lmax : lF;
+        double dx = (b - a) / (double)(n_points - 1);
+        double prev = 0.0;
+        for (int i = 0; i < n_points; i++) {
+            double lk = (i == n_points - 1) ? b : a + (double)i * dx;
+            double K = exp(lk);
+            bs_result res;
+            if (black_scholes(&res, S, K, T, r, q, smile(K, smile_ctx), is_call) != 0)
+                return -1;
+            double g = res.price / K; /* price/K^2 * dK, with dK = K dx */
+            if (i > 0)
+                integral += 0.5 * (prev + g) * dx;
+            prev = g;
+        }
     }
 
     *out = (2.0 / T) * exp(r * T) * integral;
