@@ -119,6 +119,10 @@ Implementation notes:
   the characteristic function is phase-continued across nodes; without that,
   parameters with `kappa < rho*xi` were mispriced badly enough to give a
   negative put.
+- The characteristic function avoids the cancellations that appear as
+  `xi -> 0` (`a-d` comes from `(a-d)(a+d) = -xi^2 (u^2+iu)` and the log uses
+  `log1p`), so small `xi` converges to Black-Scholes; `xi` below `1e-100` is
+  rejected because `xi^2` approaches underflow.
 - Implied vols are inverted from the out-of-the-money option (call for
   `K >= F`, otherwise the put via parity), which stays well conditioned in
   the wings. A model price outside the invertible range gives no vol: it is
@@ -248,6 +252,8 @@ time-based seed; set `BS_SEED` to reproduce a run):
   put, -4.150339, for `v0=0.04 kappa=0.1 theta=0.1 xi=1.2 rho=0.7` at `T=30`;
   the checks require the five calls and puts to match reference values within
   1e-3 and every put to be non-negative.
+- Heston with `v0 = theta` and tiny `xi` matches Black-Scholes (`xi = 1e-8` used
+  to give 8.63 instead of 9.83), and `xi` below `1e-100` is rejected.
 - The committed `surf.txt` regenerates byte-for-byte and round-trips through
   `fit` with RMSE < 1e-6 vol points, with no `n/a` points or warnings.
 - A deep-OTM model price at or below the Fourier noise floor (`PRICE_NOISE_FLOOR

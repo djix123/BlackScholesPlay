@@ -67,6 +67,7 @@
 #define MAX_DIM 10000          /* max strikes or tenors in a surface file */
 #define MAX_POINTS 1000000     /* max ns*nt */
 #define VOL_PENALTY 1.0        /* objective error for a non-invertible point */
+#define XI_MIN 1e-100          /* below this xi^2 approaches underflow */
 
 static double g_gx[PANEL_NODES], g_gw[PANEL_NODES];
 static int g_quad_ready = 0;
@@ -277,9 +278,23 @@ static double complex heston_cf(double complex u, double S, double r, double q,
     if (creal(d) < 0.0)
         d = -d;
     double complex a = kappa - rho * xi * I * u;
-    double complex g = (a - d) / (a + d);
+    /* (a-d)(a+d) = -xi^2 (u^2 + iu). One of a-d, a+d nearly cancels (a-d for
+     * small xi, a+d when Re a < 0), so take the larger directly and get the
+     * other from this product: everything divided by xi^2 below then keeps its
+     * digits as xi -> 0. */
+    double complex xw = -xi * xi * (u * u + I * u);
+    double complex amd = a - d, apd = a + d;
+    if (cabs(apd) >= cabs(amd))
+        amd = xw / apd;
+    else
+        apd = xw / amd;
+    double complex g = amd / apd;
     double complex ed = cexp(-d * T);
-    double complex L = clog((1.0 - g * ed) / (1.0 - g));
+    /* L = log((1 - g ed) / (1 - g)) = log(1 + y); the argument is within
+     * O(xi^2) of 1 for small xi, so use log1p rather than clog. */
+    double complex y = g * (1.0 - ed) / (1.0 - g);
+    double yr = creal(y), yi = cimag(y);
+    double complex L = 0.5 * log1p(yr * (2.0 + yr) + yi * yi) + I * atan2(yi, 1.0 + yr);
     if (g_cf_phase_have) {
         while (cimag(L) - g_cf_phase > M_PI)
             L -= 2.0 * M_PI * I;
@@ -288,8 +303,8 @@ static double complex heston_cf(double complex u, double S, double r, double q,
     }
     g_cf_phase = cimag(L);
     g_cf_phase_have = 1;
-    double complex C = (kappa * theta / (xi * xi)) * ((a - d) * T - 2.0 * L);
-    double complex D = ((a - d) / (xi * xi)) * (1.0 - ed) / (1.0 - g * ed);
+    double complex C = (kappa * theta / (xi * xi)) * (amd * T - 2.0 * L);
+    double complex D = (amd / (xi * xi)) * (1.0 - ed) / (1.0 - g * ed);
     return cexp(C + D * v0 + I * u * (log(S) + (r - q) * T));
 }
 
@@ -722,7 +737,7 @@ static int usage(const char *prog)
 
 static int params_ok(double S, double v0, double kappa, double theta, double xi, double rho)
 {
-    return S > 0.0 && v0 > 0.0 && kappa > 0.0 && theta > 0.0 && xi > 0.0 &&
+    return S > 0.0 && v0 > 0.0 && kappa > 0.0 && theta > 0.0 && xi >= XI_MIN &&
            fabs(rho) < 1.0;
 }
 
@@ -746,7 +761,7 @@ static int mode_price(int argc, char **argv)
     double S = a[0], K = a[1], T = a[2], r = a[3], q = a[4];
     double v0 = a[5], kappa = a[6], theta = a[7], xi = a[8], rho = a[9];
     if (K <= 0.0 || T <= 0.0 || !params_ok(S, v0, kappa, theta, xi, rho)) {
-        fprintf(stderr, "Invalid input: require S>0, K>0, T>0, v0>0, kappa>0, theta>0, xi>0, |rho|<1\n");
+        fprintf(stderr, "Invalid input: require S>0, K>0, T>0, v0>0, kappa>0, theta>0, xi>=1e-100, |rho|<1\n");
         return EXIT_FAILURE;
     }
     double call = heston_call(S, K, T, r, q, v0, kappa, theta, xi, rho);
@@ -792,7 +807,7 @@ static int mode_mc(int argc, char **argv)
     double S = a[0], K = a[1], T = a[2], r = a[3], q = a[4];
     double v0 = a[5], kappa = a[6], theta = a[7], xi = a[8], rho = a[9];
     if (K <= 0.0 || T <= 0.0 || !params_ok(S, v0, kappa, theta, xi, rho)) {
-        fprintf(stderr, "Invalid input: require S>0, K>0, T>0, v0>0, kappa>0, theta>0, xi>0, |rho|<1\n");
+        fprintf(stderr, "Invalid input: require S>0, K>0, T>0, v0>0, kappa>0, theta>0, xi>=1e-100, |rho|<1\n");
         return EXIT_FAILURE;
     }
 
@@ -964,7 +979,7 @@ static int mode_fit(int argc, char **argv)
         return EXIT_FAILURE;
     }
     if (!params_ok(S, v0, kappa, theta, xi, rho) || maxiter < 1 || maxiter > 100000000L) {
-        fprintf(stderr, "Invalid fit input: require S>0, v0>0, kappa>0, theta>0, xi>0, |rho|<1, 1<=maxiter<=1e8\n");
+        fprintf(stderr, "Invalid fit input: require S>0, v0>0, kappa>0, theta>0, xi>=1e-100, |rho|<1, 1<=maxiter<=1e8\n");
         return EXIT_FAILURE;
     }
 

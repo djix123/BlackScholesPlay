@@ -362,6 +362,20 @@ for case in "100 100 30 0.02 0 0.04 0.1 0.1 1.2 0.7|52.5295|7.4106" \
     check_gt "Heston put non-negative $args" "$p" -1e-9
 done
 
+# ---- small xi: Heston tends to Black-Scholes --------------------------------
+# With v0 = theta, xi -> 0 is Black-Scholes at vol sqrt(v0). a-d and the log both
+# used to cancel before being divided by xi^2: xi=1e-6 gave 9.827775, xi=1e-8
+# gave 8.626045 and xi=1e-10 gave 3.890051.
+for xi in 1e-6 1e-7 1e-8 1e-10 1e-100; do
+    check "Heston call xi=$xi equals BS" \
+        "$("$HC" price 100 100 1 0.05 0.01 0.04 2 0.04 "$xi" -0.7 | awk '/^Call:/{print $2}')" 9.826298 2e-6
+done
+check "Heston call xi=1e-8 K=120 T=2 rho=-0.9 equals BS" \
+    "$("$HC" price 100 120 2 0.05 0.01 0.04 2 0.04 1e-8 -0.9 | awk '/^Call:/{print $2}')" 7.083326 2e-6
+check "Heston call xi=1e-8 K=100 T=30 rho=0.9 equals BS" \
+    "$("$HC" price 100 100 30 0.05 0.01 0.04 2 0.04 1e-8 0.9 | awk '/^Call:/{print $2}')" 54.565904 2e-6
+check_fail "price rejects xi below 1e-100" "$HC" price 100 100 1 0.05 0.01 0.04 2 0.04 1e-160 -0.7
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; else echo "$fails check(s) FAILED."; fi
 [ "$fails" -eq 0 ]
