@@ -3,7 +3,7 @@
  * Calibrate Heston stochastic-vol parameters (v0, kappa, theta, xi, rho)
  * to an implied-vol surface quoted by relative strike and tenor, and
  * price vanilla options semi-analytically under Heston (characteristic
- * function, "little trap" formulation, Gauss-Legendre quadrature).
+ * function, Lewis single-integral form, Gauss-Legendre quadrature).
  *
  * Modes:
  *   price S K T r q v0 kappa theta xi rho
@@ -42,14 +42,17 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* Fourier integration: composite Gauss-Legendre over panels of width
- * PANEL_WIDTH starting at u = 0, continuing until the integrand has died out
- * (two consecutive panels each contributing < TAIL_TOL in probability units)
- * or UMAX_LIMIT is reached. The cutoff therefore adapts to the tenor: short
- * tenors have slowly decaying characteristic functions and need a far larger
- * cutoff than a fixed u_max would give. */
+/* Fourier integration: composite Gauss-Legendre over panels starting at
+ * u = 0, continuing until the integrand has died out (two consecutive panels
+ * each contributing < TAIL_TOL in price units) or UMAX_LIMIT is reached. The
+ * cutoff therefore adapts to the tenor: short tenors have slowly decaying
+ * characteristic functions and need a far larger cutoff than a fixed u_max
+ * would give. Panels are geometrically graded near u = 0 (PANEL_WIDTH0,
+ * doubling up to PANEL_WIDTH) because the Lewis integrand has a sharp feature
+ * there, next to its poles at u = +-i/2. */
 #define PANEL_NODES 32
 #define PANEL_WIDTH 10.0
+#define PANEL_WIDTH0 (1.0 / 64.0)
 #define UMAX_LIMIT 40000.0
 #define TAIL_TOL 1e-14
 
@@ -230,11 +233,29 @@ static void ensure_quad(void)
     }
 }
 
+/* Branch tracking for the complex log in heston_cf. clog() returns the
+ * principal value, whose imaginary part jumps by 2*pi when its argument
+ * crosses the negative real axis; because the log is scaled by
+ * kappa*theta/xi^2 inside the exponent, such a jump does not cancel and
+ * corrupts the integrand. Nodes are visited at increasing u, so the phase is
+ * made continuous by adding multiples of 2*pi; cf_phase_reset() restarts the
+ * tracking at the beginning of every integration. */
+static int g_cf_phase_have = 0;
+static double g_cf_phase = 0.0;
+
+static void cf_phase_reset(void)
+{
+    g_cf_phase_have = 0;
+    g_cf_phase = 0.0;
+}
+
 /* Heston risk-neutral characteristic function of x_T = ln S_T,
  * "little trap" formulation (Albrecher et al. 2007):
  *   dS/S = (r-q) dt + sqrt(v) dW1
  *   dv   = kappa(theta - v) dt + xi sqrt(v) dW2,   dW1 dW2 = rho dt
- * Accepts complex u; u - i yields the stock-measure CF.
+ * Accepts complex u; u - i/2 is the argument used by the Lewis integrand.
+ * The log's phase is continued from the previous node (see above), so calls
+ * must follow cf_phase_reset() and use increasing real u.
  */
 static double complex heston_cf(double complex u, double S, double r, double q,
                                 double T, double v0, double kappa, double theta,
@@ -247,69 +268,86 @@ static double complex heston_cf(double complex u, double S, double r, double q,
     double complex a = kappa - rho * xi * I * u;
     double complex g = (a - d) / (a + d);
     double complex ed = cexp(-d * T);
-    double complex C = (kappa * theta / (xi * xi)) *
-                       ((a - d) * T - 2.0 * clog((1.0 - g * ed) / (1.0 - g)));
+    double complex L = clog((1.0 - g * ed) / (1.0 - g));
+    if (g_cf_phase_have) {
+        while (cimag(L) - g_cf_phase > M_PI)
+            L -= 2.0 * M_PI * I;
+        while (cimag(L) - g_cf_phase < -M_PI)
+            L += 2.0 * M_PI * I;
+    }
+    g_cf_phase = cimag(L);
+    g_cf_phase_have = 1;
+    double complex C = (kappa * theta / (xi * xi)) * ((a - d) * T - 2.0 * L);
     double complex D = ((a - d) / (xi * xi)) * (1.0 - ed) / (1.0 - g * ed);
     return cexp(C + D * v0 + I * u * (log(S) + (r - q) * T));
 }
 
-/* Heston European calls for nK strikes at one maturity:
- *   C = S e^{-qT} P1 - K e^{-rT} P2
- *   P2 = 1/2 + (1/pi) int_0^inf Re[e^{-iu lnK} phi(u) / (iu)] du
- *   P1 = 1/2 + (1/pi) int_0^inf Re[e^{-iu lnK} phi(u-i) / (iu phi(-i))] du
- * with phi(-i) = F = S e^{(r-q)T}. The characteristic function does not depend
- * on K, so it is evaluated once per node and shared across all strikes. */
+/* Heston European calls for nK strikes at one maturity, in Lewis' (2003)
+ * single-integral form
+ *   C = S e^{-qT} - sqrt(S K) e^{-(r+q)T/2} / pi *
+ *       int_0^inf Re[e^{i u kap} psi(u - i/2)] / (u^2 + 1/4) du
+ * with kap = ln(F/K), F = S e^{(r-q)T} and psi(u) = phi(u) e^{-i u lnF}, the
+ * characteristic function of ln(S_T/F).
+ * This replaces the P1/P2 two-integral form, whose P1 integrand phi(u - i)
+ * develops a very sharp feature at u = 0 when kappa < rho*xi: uniform panels
+ * cannot resolve it there (width 0.01 still gave a negative put), so panels
+ * start at PANEL_WIDTH0 and double up to PANEL_WIDTH, and the log phase is
+ * tracked across nodes. psi does not depend on K, so it is evaluated once per
+ * node and shared across all strikes. */
 static void heston_calls(double S, const double *K, int nK, double T, double r, double q,
                          double v0, double kappa, double theta, double xi, double rho,
                          double *calls)
 {
     ensure_quad();
-    double F = S * exp((r - q) * T);
-    double *lnK = xmalloc((size_t)nK * sizeof *lnK);
-    double *p1 = xmalloc((size_t)nK * sizeof *p1);
-    double *p2 = xmalloc((size_t)nK * sizeof *p2);
-    double *d1 = xmalloc((size_t)nK * sizeof *d1);
-    double *d2 = xmalloc((size_t)nK * sizeof *d2);
+    cf_phase_reset();
+    double lnF = log(S) + (r - q) * T;
+    double *kap = xmalloc((size_t)nK * sizeof *kap);
+    double *pref = xmalloc((size_t)nK * sizeof *pref);
+    double *intg = xmalloc((size_t)nK * sizeof *intg);
+    double *panel = xmalloc((size_t)nK * sizeof *panel);
     for (int i = 0; i < nK; i++) {
-        lnK[i] = log(K[i]);
-        p1[i] = p2[i] = 0.5;
+        kap[i] = lnF - log(K[i]);
+        pref[i] = sqrt(S * K[i]) * exp(-0.5 * (r + q) * T);
+        intg[i] = 0.0;
     }
 
     int quiet = 0;
-    for (double a = 0.0; a < UMAX_LIMIT && quiet < 2; a += PANEL_WIDTH) {
+    double a = 0.0;
+    for (double width = PANEL_WIDTH0; a < UMAX_LIMIT && quiet < 2; ) {
         for (int i = 0; i < nK; i++)
-            d1[i] = d2[i] = 0.0;
+            panel[i] = 0.0;
         for (int n = 0; n < PANEL_NODES; n++) {
-            double u = a + 0.5 * PANEL_WIDTH * (g_gx[n] + 1.0);
-            double w = 0.5 * PANEL_WIDTH * g_gw[n] / M_PI;
-            double complex ph_u = heston_cf(u, S, r, q, T, v0, kappa, theta, xi, rho);
-            double complex ph_um = heston_cf(u - I, S, r, q, T, v0, kappa, theta, xi, rho);
-            double complex f2 = ph_u / (I * u);
-            double complex f1 = ph_um / (I * u * F);
-            for (int i = 0; i < nK; i++) {
-                double complex e = cexp(-I * u * lnK[i]);
-                d2[i] += w * creal(e * f2);
-                d1[i] += w * creal(e * f1);
-            }
+            double u = a + 0.5 * width * (g_gx[n] + 1.0);
+            double w = 0.5 * width * g_gw[n] / M_PI;
+            double complex z = u - 0.5 * I;
+            double complex psi = heston_cf(z, S, r, q, T, v0, kappa, theta, xi, rho) *
+                                 cexp(-I * z * lnF);
+            double complex f = psi / (u * u + 0.25);
+            for (int i = 0; i < nK; i++)
+                panel[i] += w * creal(cexp(I * u * kap[i]) * f);
         }
         double biggest = 0.0;
         for (int i = 0; i < nK; i++) {
-            p1[i] += d1[i];
-            p2[i] += d2[i];
-            biggest = fmax(biggest, fmax(fabs(d1[i]), fabs(d2[i])));
+            intg[i] += panel[i];
+            biggest = fmax(biggest, fabs(panel[i]));
         }
         quiet = biggest < TAIL_TOL ? quiet + 1 : 0;
+        a += width;
+        if (width < PANEL_WIDTH) {
+            width *= 2.0;
+            if (width > PANEL_WIDTH)
+                width = PANEL_WIDTH;
+        }
     }
 
     for (int i = 0; i < nK; i++) {
-        double c = S * exp(-q * T) * p1[i] - K[i] * exp(-r * T) * p2[i];
+        double c = S * exp(-q * T) - pref[i] * intg[i];
         calls[i] = c > 0.0 ? c : 0.0;
     }
-    free(lnK);
-    free(p1);
-    free(p2);
-    free(d1);
-    free(d2);
+    free(kap);
+    free(pref);
+    free(intg);
+    free(panel);
 }
 
 static double heston_call(double S, double K, double T, double r, double q,

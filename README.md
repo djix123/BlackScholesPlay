@@ -65,7 +65,7 @@ Example:
 
 Calibrates Heston parameters (v0, kappa, theta, xi, rho) to an implied-vol
 surface quoted by relative strike and tenor, using a semi-analytic Heston
-pricer (characteristic function, "little trap" formulation, Gauss-Legendre
+pricer (characteristic function, Lewis single-integral form, Gauss-Legendre
 quadrature) and Nelder-Mead on the mean squared implied-vol error.
 
 Build:
@@ -100,10 +100,17 @@ check of the semi-analytic pricer; it honours `BS_SEED`.
 
 Implementation notes:
 
-- The Fourier integral uses composite Gauss-Legendre panels and continues
-  until the integrand has died out, so short tenors (which decay slowly) are
-  priced accurately; the characteristic function is evaluated once per tenor
-  and shared across all strikes.
+- The Fourier integral uses the Lewis single-integral form (one integral of
+  `Re[e^{iu ln(F/K)} psi(u - i/2)] / (u^2 + 1/4)`, where `psi` is the
+  characteristic function of `ln(S_T/F)`) with composite Gauss-Legendre panels
+  that continue until the integrand has died out, so short tenors (which decay
+  slowly) are priced accurately; the characteristic function is evaluated once
+  per tenor and shared across all strikes. Because the shifted argument sits
+  next to the integrand's poles at `u = +-i/2`, the panels are geometrically
+  graded near `u = 0` (width `1/64`, doubling up to 10) and the complex log in
+  the characteristic function is phase-continued across nodes; without that,
+  parameters with `kappa < rho*xi` were mispriced badly enough to give a
+  negative put.
 - Implied vols are inverted from the out-of-the-money option (call for
   `K >= F`, otherwise the put via parity), which stays well conditioned in
   the wings. A model price outside the invertible range gives no vol: it is
@@ -194,8 +201,19 @@ time-based seed; set `BS_SEED` to reproduce a run):
 - The Heston Fourier price is accurate at short and long tenors (T = 0.003 and
   T = 10 against high-resolution references) and agrees with an independent
   Heston Monte-Carlo (`heston_calibrate mc`) within 5 SE.
-- The committed `surf.txt` regenerates byte-for-byte and round-trips through
-  `fit` with RMSE < 1e-6 vol points, with no `n/a` points or warnings.
+- The Heston price is also right for large `xi`, where the old uniform-panel
+  P1/P2 quadrature was wrong (four of the five cases have `kappa < rho*xi`;
+  `xi` up to 2, `T` up to 30y). The old code gave call 40.968498 and a negative
+  put, -4.150339, for `v0=0.04 kappa=0.1 theta=0.1 xi=1.2 rho=0.7` at `T=30`;
+  the checks require the five calls and puts to match reference values within
+  1e-3 and every put to be non-negative.
+- The committed `surf.txt` round-trips through `fit` with RMSE < 1e-6 vol
+  points, with no `n/a` points or warnings. It is still the surface generated
+  before the Lewis quadrature fix: re-running the `gen` command above now
+  changes 3 of the 54 vols, all in the one-month column (largest change 2.3e-7,
+  at `k = 1.3`, where the model call price is 2.5e-9 and double-precision
+  quadrature resolves the implied vol only to about 1e-6), so the byte-for-byte
+  check in `regress.sh` fails until `surf.txt` is regenerated.
 - Surface files with truncated, non-positive, non-finite or trailing data are
   rejected; `gen` refuses to write a surface with non-invertible points (and
   writes no file); non-numeric command-line arguments are rejected; the `var`
