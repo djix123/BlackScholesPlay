@@ -53,9 +53,17 @@ model-free variance-swap strike:
   `E[V] = theta + (v0-theta)(1-e^{-kappa T})/(kappa T)` for comparison.
   The run also prints the Feller ratio `2 kappa theta / xi^2` (variance stays
   positive when it is >= 1; full truncation handles the other case).
-- The replication integrates over a log-strike grid centred on the forward
-  with half-width `max(8 sigma sqrt(T), 4)` and spacing `<= min(0.001,
-  sigma sqrt(T)/100)`, so the wings are covered for large `sigma sqrt(T)`.
+- The replication integrates on an asymmetric log-strike grid running from
+  `ln F - sigma^2 T/2 - 8 sigma sqrt(T)` to `ln F + 8 sigma sqrt(T)`. With
+  `s = sigma sqrt(T)`, `ln K` under the risk-neutral measure is normal with
+  mean `ln F - s^2/2` and standard deviation `s`, so that window covers the
+  whole distribution however large `s` gets (the half-width is kept at 4 or
+  more whenever the spacing makes it affordable). Spacing is
+  `<= min(0.001, s/100)` with no floor, and the puts and the calls are
+  integrated as two grids that both end at `K = F`, where the integrand has a
+  kink. If the grid would need more than 5e7 points, or a strike limit would
+  overflow `exp()`, the run reports `Failed to compute variance swap strike`
+  instead of a wrong number.
 
 Example:
 
@@ -190,7 +198,12 @@ time-based seed; set `BS_SEED` to reproduce a run):
   partial start-parameter lists and trailing arguments instead of ignoring them.
 - The variance-swap strike equals `sigma^2` for large `sigma sqrt(T)`
   (`sigma=1, T=5` used to give 0.893 because the strike grid was cut at fixed
-  multiples of the forward) and for small ones (`sigma=0.05, T=0.1`).
+  multiples of the forward, and the old grid symmetric about `ln F` missed the
+  `-s^2/2` shift of the log-price, giving 3.216 for `sigma=2, T=100`) and for
+  small ones (`sigma=0.05, T=0.1`, and `sigma=0.001, T=0.001` where the old
+  `1e-4` floor on the spacing gave 0.000003 instead of 0.000001); grids that
+  would need more than 5e7 points (`sigma=10, T=100` and `sigma=1e5, T=1e4`)
+  are refused with an error instead of overflowing the int point count.
 - The Heston Fourier price is accurate at short and long tenors (T = 0.003 and
   T = 10 against high-resolution references) and agrees with an independent
   Heston Monte-Carlo (`heston_calibrate mc`) within 5 SE.
