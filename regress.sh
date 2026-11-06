@@ -251,7 +251,7 @@ if echo "$out" | grep -q 'warning: stopped at maxiter=20 without converging; inc
 else
     echo "FAIL  fit is silent when it stops at maxiter=20"; fails=$((fails + 1))
 fi
-# the same start does meet the convergence test by maxiter=3000 (it needs 294)
+# the same start does meet the convergence test by maxiter=3000
 out=$("$HC" fit surf.txt 100 0.05 0.02 0.02 1.0 0.03 0.5 -0.3 3000); rc=$?
 check "converged fit exits 0" "$rc" 0 0
 if echo "$out" | grep -q 'stopped at maxiter'; then
@@ -287,7 +287,7 @@ check "swap strike sigma=0.0316227766 T=1e-07 (same grid, scaled up)" \
 # A grid too large to integrate is refused with the error message rather than a
 # wrong number (the point count used to go through an int cast that overflowed
 # for sigma=1e5, T=1e4).
-check_fail "swap strike rejects sigma=10, T=100 (5.1e7 points)" \
+check_fail "swap strike rejects sigma=10, T=100 (strike limit beyond exp range)" \
     "$BS" var 100 100 0 0 10 0.04 0.04 2 0.04 0.3 -0.7
 check_fail "swap strike rejects sigma=100000, T=10000" \
     "$BS" var 100 10000 0 0 100000 0.04 0.04 2 0.04 0.3 -0.7
@@ -329,7 +329,7 @@ check_fail "gen refuses noise-dominated wing surface" \
     "$HC" gen "$TMP/noise.txt" 100 0.05 0.01 0.04 2 0.05 0.3 -0.7 9 3 0.5 1.5 0.01 0.05
 [ ! -e "$TMP/noise.txt" ] && echo "PASS  gen wrote no file for the wing surface" ||
     { echo "FAIL  gen left a file behind for the wing surface"; fails=$((fails + 1)); }
-# krel=0.75 (K=75) at T=0.01 is such a point: the pricer returns ~1e-14 of
+# krel=0.75 (K=75) at T=0.01 is such a point: the pricer returns ~1e-13 of
 # noise there, which price mode used to print as vol 0.384044. gen must name it
 # among the non-invertible points it refuses to write.
 if "$HC" gen "$TMP/noise.txt" 100 0.05 0.01 0.04 2 0.05 0.3 -0.7 9 3 0.5 1.5 0.01 0.05 2>&1 >/dev/null |

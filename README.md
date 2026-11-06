@@ -123,13 +123,13 @@ Implementation notes:
   `K >= F`, otherwise the put via parity), which stays well conditioned in
   the wings. A model price outside the invertible range gives no vol: it is
   shown as `n/a`, penalised in the fit objective (not clamped), and makes
-  `gen` refuse to write the surface. The Fourier integral is only accurate to
-  about `1e-13` of spot in absolute price, so an OTM price below
-  `PRICE_NOISE_FLOOR * S` (`1e-11` at `S = 100`) is quadrature noise rather
-  than a price: it is treated as non-invertible instead of being inverted, which
+  `gen` refuse to write the surface. The Fourier integral carries absolute
+  noise of about `1e-13` at `S = 100`, so an OTM price below
+  `PRICE_NOISE_FLOOR * S` (`1e-11` at `S = 100`, about 100 times that noise)
+  is treated as noise rather than a price: it is treated as non-invertible instead of being inverted, which
   would otherwise report an arbitrary vol (the `K=75, T=0.01` put under the
-  example parameters is far below the floor, and the `~1e-14` the pricer
-  returned there used to invert to 0.384). The cut is on price, not
+  example parameters is truly about `1e-28`, and the noise the pricer returned
+  there used to invert to 0.384). The cut is on price, not
   on moneyness or tenor: a genuinely tiny but resolved price still gives a vol
   (at `K=110, T=0.01` the call is `1.0e-8` and gives 0.175461), while deeper
   strikes at the same tenor give `n/a`. In the committed 9x6 surface the
@@ -138,9 +138,8 @@ Implementation notes:
   Nelder-Mead uses up `maxiter` before meeting its convergence test
   (`warning: stopped at maxiter=<N> without converging; increase maxiter`);
   the fit is still reported and the exit status stays 0. On `surf.txt` from
-  the start `0.02 1.0 0.03 0.5 -0.3` the test is first met on the 294th
-  iteration (`maxiter=294` is the smallest budget that converges), so
-  `maxiter=20` warns and `maxiter=3000` does not.
+  the start `0.02 1.0 0.03 0.5 -0.3`, `maxiter=20` warns and `maxiter=3000`
+  does not.
 - `ns = 1` (`nt = 1`) in `gen` uses `kmin` (`tmin`) only, so an explicit
   `kmax` (`tmax`) must equal it.
 - Surface files are validated: `1 <= ns, nt <= 10000`, `ns*nt <= 10^6`,
@@ -192,7 +191,7 @@ vol 0.199964; a fixed cutoff of 200 gave 0.1943):
 
 Deep OTM strikes whose true price is below the pricer's `1e-13` absolute noise
 print `n/a` instead of a vol invented from that noise (at `K=75` the pricer
-returns only `~1e-14` of noise); the `K=110` call is a resolved 1.0e-8 and keeps
+returns only `~1e-13` of noise); the `K=110` call is a resolved 1.0e-8 and keeps
 its vol:
 
     ./heston_calibrate price 100 75 0.01 0.05 0.01 0.04 2 0.05 0.3 -0.7
@@ -236,9 +235,10 @@ time-based seed; set `BS_SEED` to reproduce a run):
   multiples of the forward, and the old grid symmetric about `ln F` missed the
   `-s^2/2` shift of the log-price, giving 3.216 for `sigma=2, T=100`) and for
   small ones (`sigma=0.05, T=0.1`, and `sigma=0.001, T=0.001` where the old
-  `1e-4` floor on the spacing gave 0.000003 instead of 0.000001); grids that
-  would need more than 5e7 points (`sigma=10, T=100` and `sigma=1e5, T=1e4`)
-  are refused with an error instead of overflowing the int point count.
+  `1e-4` floor on the spacing gave 0.000003 instead of 0.000001); grids
+  whose strike limits fall outside the range of `exp()` (`sigma=10, T=100` and
+  `sigma=1e5, T=1e4`) are refused with an error instead of giving a wrong
+  number or overflowing the int point count.
 - The Heston Fourier price is accurate at short and long tenors (T = 0.003 and
   T = 10 against high-resolution references) and agrees with an independent
   Heston Monte-Carlo (`heston_calibrate mc`) within 5 SE.

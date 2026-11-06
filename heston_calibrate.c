@@ -56,12 +56,12 @@
 #define UMAX_LIMIT 40000.0
 #define TAIL_TOL 1e-14
 
-/* The Fourier pricer's own absolute accuracy is around 1e-13 (per unit of
- * spot), so a deep-out-of-the-money price smaller than PRICE_NOISE_FLOOR * S
- * carries no information - it is quadrature noise, not a price. Inverting such
- * a price reports an arbitrary implied vol (at K=75, T=0.01 the pricer returns
- * only ~1e-14 of noise, which used to invert to 0.384), so those points are
- * reported as non-invertible instead. */
+/* The Fourier pricer carries absolute noise of about 1e-13 at S = 100, so a
+ * deep-out-of-the-money price smaller than PRICE_NOISE_FLOOR * S (1e-11 there,
+ * about 100 times that noise) carries no information - it is noise, not a
+ * price. Inverting such a price reports an arbitrary implied vol (at K=75,
+ * T=0.01 the true put is about 1e-28, and the noise returned instead used to
+ * invert to 0.384), so those points are reported as non-invertible instead. */
 #define PRICE_NOISE_FLOOR 1e-13
 
 #define MAX_DIM 10000          /* max strikes or tenors in a surface file */
