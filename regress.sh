@@ -13,8 +13,11 @@ BS="$TMP/black_scholes"
 HC="$TMP/heston_calibrate"
 fails=0
 
-gcc -O2 -Wall -Wextra -o "$BS" black_scholes.c -lm || exit 1
-gcc -O2 -Wall -Wextra -o "$HC" heston_calibrate.c -lm || exit 1
+# CC and REGRESS_CFLAGS may be set by the caller (see the Makefile).
+CC=${CC:-gcc}
+CFLAGS=${REGRESS_CFLAGS:--O2}
+$CC $CFLAGS -Wall -Wextra -o "$BS" black_scholes.c -lm || exit 1
+$CC $CFLAGS -Wall -Wextra -o "$HC" heston_calibrate.c -lm || exit 1
 
 # check NAME VALUE EXPECTED TOL   (|VALUE-EXPECTED| <= TOL)
 check() {
@@ -95,8 +98,16 @@ check "Heston implied vol" "$(echo "$out" | awk '/^Call:/{print $7}')" 0.2107  5
 
 # ---- calibration ------------------------------------------------------------
 "$HC" gen "$TMP/surf.txt" 100 0.05 0.02 0.04 2.0 0.05 0.3 -0.7 9 6 0.7 1.3 0.0833333333 3.0 >/dev/null
-if diff -q "$TMP/surf.txt" surf.txt >/dev/null; then
-    echo "PASS  gen reproduces committed surf.txt"
+# Numeric, not byte-for-byte: the 1-month k=1.3 price is 2.5e-9, where the last
+# digits of the vol are rounding noise that differs between math libraries.
+surf_close() {
+    awk -v tol=1e-6 '!/^#/ { for (i = 1; i <= NF; i++)
+            if (NR == FNR) a[++n] = $i
+            else { m++; d = $i - a[m]; if (d < 0) d = -d; if (d > tol) bad = 1 } }
+        END { exit (bad || n != m || n == 0) }' "$1" "$2"
+}
+if surf_close "$TMP/surf.txt" surf.txt; then
+    echo "PASS  gen reproduces committed surf.txt (within 1e-6)"
 else
     echo "FAIL  gen output differs from surf.txt"; fails=$((fails + 1))
 fi
@@ -114,7 +125,7 @@ for fill in 00 7f ff; do
 static void *poison_malloc(size_t n) { void *p = malloc(n); if (p) memset(p, 0x$fill, n); return p; }
 #define malloc poison_malloc
 HDR
-    gcc -O2 -include "$TMP/poison$fill.h" -o "$TMP/hc_$fill" heston_calibrate.c -lm || exit 1
+    $CC $CFLAGS -include "$TMP/poison$fill.h" -o "$TMP/hc_$fill" heston_calibrate.c -lm || exit 1
     out=$("$TMP/hc_$fill" fit surf.txt 100 0.05 0.02 0.02 1.0 0.03 0.5 -0.3 3000)
     check_lt "fit round-trip MSE, malloc filled 0x$fill" "$(echo "$out" | mse)" 1e-12
 done
@@ -375,6 +386,20 @@ check "Heston call xi=1e-8 K=120 T=2 rho=-0.9 equals BS" \
 check "Heston call xi=1e-8 K=100 T=30 rho=0.9 equals BS" \
     "$("$HC" price 100 100 30 0.05 0.01 0.04 2 0.04 1e-8 0.9 | awk '/^Call:/{print $2}')" 54.565904 2e-6
 check_fail "price rejects xi below 1e-100" "$HC" price 100 100 1 0.05 0.01 0.04 2 0.04 1e-160 -0.7
+
+# ---- Fourier cutoff and Monte-Carlo step limits ------------------------------
+# A cutoff of 40000 silently truncated the integral at T=1e-7 (iv 0.108).
+for T in 1e-7 1e-8; do
+    check "Heston iv, T=$T (vol 0.1)" \
+        "$("$HC" price 100 100 "$T" 0 0 0.01 2 0.01 0.3 -0.7 | awk '/^Call:/{print $7}')" 0.1 1e-5
+done
+check_fail "price refuses a Fourier integral that cannot converge" \
+    "$HC" price 100 100 1e-10 0 0 0.01 2 0.01 0.3 -0.7
+# The step count used to overflow its int (undefined behaviour, then garbage).
+check_fail "var mc rejects too many time steps" \
+    "$BS" var 100 1e10 0 0 0 0.04 0.04 2 0.04 0.3 -0.7 mc 1
+check_fail "heston mc rejects too many time steps" \
+    "$HC" mc 100 100 1e8 0 0 0.04 2 0.05 0.3 -0.7 2
 
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; else echo "$fails check(s) FAILED."; fi

@@ -35,25 +35,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include "common.h"
 
 /* Fourier integration: composite Gauss-Legendre over panels starting at
  * u = 0, continuing until the integrand has died out (two consecutive panels
  * each contributing < TAIL_TOL in price units) or UMAX_LIMIT is reached. The
  * cutoff therefore adapts to the tenor: short tenors have slowly decaying
  * characteristic functions and need a far larger cutoff than a fixed u_max
- * would give. Panels are geometrically graded near u = 0 (PANEL_WIDTH0,
+ * would give. If UMAX_LIMIT is reached first the price is NaN, not a truncated
+ * integral. Panels are geometrically graded near u = 0 (PANEL_WIDTH0,
  * doubling up to PANEL_WIDTH) because the Lewis integrand has a sharp feature
  * there, next to its poles at u = +-i/2. */
 #define PANEL_NODES 32
 #define PANEL_WIDTH 10.0
 #define PANEL_WIDTH0 (1.0 / 64.0)
-#define UMAX_LIMIT 40000.0
+#define UMAX_LIMIT 1e6
 #define TAIL_TOL 1e-14
 
 /* The Fourier pricer carries absolute noise of about 1e-13 at S = 100, so a
@@ -87,79 +84,7 @@ static void *xmalloc(size_t n)
     return p;
 }
 
-/* ---------------- strict argument parsing ---------------- */
-
-static int parse_double(const char *s, double *out)
-{
-    char *end;
-    errno = 0;
-    double v = strtod(s, &end);
-    if (end == s || *end != '\0' || errno == ERANGE || !isfinite(v))
-        return -1;
-    *out = v;
-    return 0;
-}
-
-static int parse_long(const char *s, long *out)
-{
-    char *end;
-    errno = 0;
-    long v = strtol(s, &end, 10);
-    if (end == s || *end != '\0' || errno == ERANGE)
-        return -1;
-    *out = v;
-    return 0;
-}
-
-/* Parse n numeric args argv[0..n-1]; names[] is used in the error message. */
-static int parse_args(char **argv, const char *const *names, int n, double *out)
-{
-    for (int i = 0; i < n; i++) {
-        if (parse_double(argv[i], &out[i]) != 0) {
-            fprintf(stderr, "Invalid number '%s' for %s\n", argv[i], names[i]);
-            return -1;
-        }
-    }
-    return 0;
-}
-
-/* Seed drand48 once per process; BS_SEED=<n> gives a reproducible run. */
-static void rng_seed_once(void)
-{
-    static int done = 0;
-    if (done)
-        return;
-    done = 1;
-
-    unsigned long long s = 0;
-    const char *env = getenv("BS_SEED");
-    int have = 0;
-    if (env && *env) {
-        char *end;
-        errno = 0;
-        s = strtoull(env, &end, 10);
-        if (*end == '\0' && errno != ERANGE)
-            have = 1;
-        else
-            fprintf(stderr, "Ignoring invalid BS_SEED '%s'\n", env);
-    }
-    if (!have)
-        s = (unsigned long long)time(NULL) ^
-            ((unsigned long long)getpid() << 20) ^ (unsigned long long)clock();
-    s *= 0x9E3779B97F4A7C15ULL;
-    s ^= s >> 29;
-    unsigned short seed[3] = {(unsigned short)(s & 0xffff),
-                              (unsigned short)((s >> 16) & 0xffff),
-                              (unsigned short)((s >> 32) & 0xffff)};
-    seed48(seed);
-}
-
 /* ---------------- Black-Scholes and implied vol ---------------- */
-
-static double norm_cdf(double x)
-{
-    return 0.5 * erfc(-x / sqrt(2.0));
-}
 
 /* Black-Scholes call (is_call=1) or put. */
 static double bs_price(int is_call, double S, double K, double T, double r, double q,
@@ -319,7 +244,8 @@ static double complex heston_cf(double complex u, double S, double r, double q,
  * cannot resolve it there (width 0.01 still gave a negative put), so panels
  * start at PANEL_WIDTH0 and double up to PANEL_WIDTH, and the log phase is
  * tracked across nodes. psi does not depend on K, so it is evaluated once per
- * node and shared across all strikes. */
+ * node and shared across all strikes. If the integrand has not died out by
+ * UMAX_LIMIT every price is NaN, which callers report as non-invertible. */
 static void heston_calls(double S, const double *K, int nK, double T, double r, double q,
                          double v0, double kappa, double theta, double xi, double rho,
                          double *calls)
@@ -368,7 +294,7 @@ static void heston_calls(double S, const double *K, int nK, double T, double r, 
 
     for (int i = 0; i < nK; i++) {
         double c = S * exp(-q * T) - pref[i] * intg[i];
-        calls[i] = c > 0.0 ? c : 0.0;
+        calls[i] = quiet < 2 ? NAN : (c > 0.0 ? c : 0.0);
     }
     free(kap);
     free(pref);
@@ -765,6 +691,10 @@ static int mode_price(int argc, char **argv)
         return EXIT_FAILURE;
     }
     double call = heston_call(S, K, T, r, q, v0, kappa, theta, xi, rho);
+    if (!isfinite(call)) {
+        fprintf(stderr, "Fourier integral did not converge (T or variance too small)\n");
+        return EXIT_FAILURE;
+    }
     double put = call - S * exp(-q * T) + K * exp(-r * T);
     double iv = bs_otm_implied_vol(call, S, K, T, r, q);
     printf("Heston vanilla  S=%.6g K=%.6g T=%.6g r=%.6g q=%.6g\n", S, K, T, r, q);
@@ -776,16 +706,6 @@ static int mode_price(int argc, char **argv)
         printf("Call: %.6f  Put: %.6f  Implied vol: n/a (price outside the invertible range)\n",
                call, put);
     return EXIT_SUCCESS;
-}
-
-/* Standard normal via Box-Muller on drand48(). */
-static double bm_rand(void)
-{
-    double u1 = drand48();
-    double u2 = drand48();
-    while (u1 <= 0.0)
-        u1 = drand48();
-    return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
 }
 
 /* Monte-Carlo Heston vanilla (full-truncation Euler, antithetic) compared with
@@ -812,9 +732,12 @@ static int mode_mc(int argc, char **argv)
     }
 
     rng_seed_once();
-    int N = (int)ceil(500.0 * T);
-    if (N < 100)
-        N = 100;
+    double steps = ceil(500.0 * T);
+    if (steps > MC_MAX_STEPS) {
+        fprintf(stderr, "Invalid Monte-Carlo input: at most 1e7 time steps (500 per year)\n");
+        return EXIT_FAILURE;
+    }
+    int N = steps < 100.0 ? 100 : (int)steps;
     double dt = T / N, sdt = sqrt(dt);
     double disc = exp(-r * T);
     double sq1mr2 = sqrt(1.0 - rho * rho);
@@ -844,6 +767,10 @@ static int mode_mc(int argc, char **argv)
     double pse = sqrt(fmax(psq / paths - pm * pm, 0.0) / paths);
 
     double fc = heston_call(S, K, T, r, q, v0, kappa, theta, xi, rho);
+    if (!isfinite(fc)) {
+        fprintf(stderr, "Fourier integral did not converge (T or variance too small)\n");
+        return EXIT_FAILURE;
+    }
     double fp = fc - S * exp(-q * T) + K * exp(-r * T);
     printf("Heston Monte-Carlo (%ld paths, %d steps, full-truncation Euler, antithetic)\n",
            paths, N);

@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make
+      - name: Regression checks
+        run: make test
+      - name: Regression checks under ASan and UBSan
+        run: make sanitize
+        env:
+          ASAN_OPTIONS: detect_leaks=0

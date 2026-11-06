@@ -1,87 +1,9 @@
-#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-static double norm_cdf(double x)
-{
-    return 0.5 * erfc(-x / sqrt(2.0));
-}
-
-/* Strict number parsing: the whole string must be a finite number. */
-static int parse_double(const char *s, double *out)
-{
-    char *end;
-    errno = 0;
-    double v = strtod(s, &end);
-    if (end == s || *end != '\0' || errno == ERANGE || !isfinite(v))
-        return -1;
-    *out = v;
-    return 0;
-}
-
-static int parse_long(const char *s, long *out)
-{
-    char *end;
-    errno = 0;
-    long v = strtol(s, &end, 10);
-    if (end == s || *end != '\0' || errno == ERANGE)
-        return -1;
-    *out = v;
-    return 0;
-}
-
-/* Parse n numeric arguments argv[0..n-1] into out[]; names[] is for errors.
- * Returns 0 on success, -1 (after printing a message) on the first bad one. */
-static int parse_args(char **argv, const char *const *names, int n, double *out)
-{
-    for (int i = 0; i < n; i++) {
-        if (parse_double(argv[i], &out[i]) != 0) {
-            fprintf(stderr, "Invalid number '%s' for %s\n", argv[i], names[i]);
-            return -1;
-        }
-    }
-    return 0;
-}
-
-/* Seed drand48 once per process. Set BS_SEED=<unsigned integer> for a
- * reproducible run; otherwise the seed mixes the time, pid and clock. */
-static void rng_seed_once(void)
-{
-    static int done = 0;
-    if (done)
-        return;
-    done = 1;
-
-    unsigned long long s = 0;
-    const char *env = getenv("BS_SEED");
-    int have = 0;
-    if (env && *env) {
-        char *end;
-        errno = 0;
-        s = strtoull(env, &end, 10);
-        if (*end == '\0' && errno != ERANGE)
-            have = 1;
-        else
-            fprintf(stderr, "Ignoring invalid BS_SEED '%s'\n", env);
-    }
-    if (!have)
-        s = (unsigned long long)time(NULL) ^
-            ((unsigned long long)getpid() << 20) ^ (unsigned long long)clock();
-    s *= 0x9E3779B97F4A7C15ULL; /* spread small seeds across all 48 bits */
-    s ^= s >> 29;
-    unsigned short seed[3] = {(unsigned short)(s & 0xffff),
-                              (unsigned short)((s >> 16) & 0xffff),
-                              (unsigned short)((s >> 32) & 0xffff)};
-    seed48(seed);
-}
+#include "common.h"
 
 typedef struct {
     double price;
@@ -196,11 +118,7 @@ int black_scholes_mc(mc_result *out, double S, double K, double T,
     long n = 0;
 
     for (long i = 0; i < paths; i++) {
-        double u1 = drand48();
-        double u2 = drand48();
-        while (u1 <= 0.0)
-            u1 = drand48();
-        double z = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+        double z = bm_rand();
 
         double st_plus = S * exp(drift + vol * z);
         double st_minus = S * exp(drift - vol * z);
@@ -229,16 +147,6 @@ int black_scholes_mc(mc_result *out, double S, double K, double T,
     out->call_std_err = sqrt(call_var / n);
     out->put_std_err = sqrt(put_var / n);
     return 0;
-}
-
-/* Standard normal via Box-Muller on drand48(). */
-static double bm_rand(void)
-{
-    double u1 = drand48();
-    double u2 = drand48();
-    while (u1 <= 0.0)
-        u1 = drand48();
-    return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
 }
 
 /* Flat implied-vol smile: every strike gets the same volatility.
@@ -370,7 +278,8 @@ static double heston_expected_variance(double v0, double kappa, double theta, do
  * Realized variance per path: V = (1/T) sum (ln S_i/S_{i-1})^2, i.e. annualized
  * by the actual elapsed time so that E[V] matches the analytic Heston E[V]
  * for any T (annualizing by 252/N would bias V when 252 T is not an integer).
- * Antithetic variates. Returns 0 on success, -1 on invalid input.
+ * Antithetic variates. Returns 0 on success, -1 on invalid input or when N
+ * would exceed MC_MAX_STEPS.
  */
 int heston_variance_mc(var_mc_result *out, double S, double T, double r, double q,
                        double Kvar, double v0, double kappa, double theta,
@@ -382,9 +291,10 @@ int heston_variance_mc(var_mc_result *out, double S, double T, double r, double 
 
     rng_seed_once();
 
-    int N = (int)(252.0 * T + 0.5);
-    if (N < 1)
-        N = 1;
+    double steps = floor(252.0 * T + 0.5);
+    if (steps > MC_MAX_STEPS)
+        return -1;
+    int N = steps < 1.0 ? 1 : (int)steps;
     double dt = T / N;
     double ann = 1.0 / T;
     double sdt = sqrt(dt);
@@ -531,7 +441,8 @@ static int main_variance(const char *prog, int argc, char **argv)
     if (run_mc) {
         var_mc_result mc;
         if (heston_variance_mc(&mc, S, T, r, q, Kvar, v0, kappa, theta, xi, rho, paths) != 0) {
-            fprintf(stderr, "Invalid Monte-Carlo input: require PATHS > 0\n");
+            fprintf(stderr, "Invalid Monte-Carlo input: require PATHS > 0 and "
+                            "at most 1e7 time steps (252 per year)\n");
             return EXIT_FAILURE;
         }
         printf("\nMonte-Carlo variance options (%ld paths, antithetic, daily fixings):\n", paths);

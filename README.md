@@ -15,6 +15,10 @@ surface quoted by relative strike and tenor.
 
 ## Build
 
+    make
+
+or build one tool directly (`common.h` holds the helpers both tools share):
+
     gcc -O2 -o black_scholes black_scholes.c -lm
 
 ## Usage
@@ -123,6 +127,10 @@ Implementation notes:
   `xi -> 0` (`a-d` comes from `(a-d)(a+d) = -xi^2 (u^2+iu)` and the log uses
   `log1p`), so small `xi` converges to Black-Scholes; `xi` below `1e-100` is
   rejected because `xi^2` approaches underflow.
+- If the integrand has not died out by `u = 1e6` (around `T = 1e-9` at 10% vol)
+  the price is treated as failed: `price` and `mc` report an error, `fit` and
+  `gen` treat the points as non-invertible.
+- Monte-Carlo runs are limited to 1e7 time steps per path.
 - Implied vols are inverted from the out-of-the-money option (call for
   `K >= F`, otherwise the put via parity), which stays well conditioned in
   the wings. A model price outside the invertible range gives no vol: it is
@@ -212,7 +220,11 @@ perturbed start (expect RMSE ~5e-9 vol points, Feller ratio 2.22):
 
 ## Regression checks
 
-    ./regress.sh
+    make test        # or ./regress.sh
+    make sanitize    # the same checks under ASan and UBSan
+
+GitHub Actions runs both on Linux and macOS for every push to `main` and every
+pull request (leak detection is off there).
 
 Builds both tools into a temp dir and runs all of the checks above plus
 regressions for previously fixed bugs, exiting non-zero on any failure
@@ -254,7 +266,7 @@ time-based seed; set `BS_SEED` to reproduce a run):
   1e-3 and every put to be non-negative.
 - Heston with `v0 = theta` and tiny `xi` matches Black-Scholes (`xi = 1e-8` used
   to give 8.63 instead of 9.83), and `xi` below `1e-100` is rejected.
-- The committed `surf.txt` regenerates byte-for-byte and round-trips through
+- The committed `surf.txt` regenerates to within 1e-6 and round-trips through
   `fit` with RMSE < 1e-6 vol points, with no `n/a` points or warnings.
 - A deep-OTM model price at or below the Fourier noise floor (`PRICE_NOISE_FLOOR
   * S`) gives `n/a` rather than an implied vol inverted from quadrature noise,
@@ -264,5 +276,8 @@ time-based seed; set `BS_SEED` to reproduce a run):
   rejected; `gen` refuses to write a surface with non-invertible points (and
   writes no file); non-numeric command-line arguments are rejected; the `var`
   usage message names the program.
+- `T = 1e-7` and `1e-8` price correctly (a cutoff of 40000 gave vol 0.108 at
+  `T = 1e-7`), a Fourier integral that cannot converge is an error, and a time
+  step count too large for a Monte-Carlo path is rejected.
 - `BS_SEED` makes `black_scholes mc`, `black_scholes var ... mc` and
   `heston_calibrate mc` reproducible, and different seeds give different runs.
