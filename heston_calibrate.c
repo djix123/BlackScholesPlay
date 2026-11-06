@@ -65,6 +65,7 @@
 #define MAX_POINTS 1000000     /* max ns*nt */
 #define VOL_PENALTY 1.0        /* objective error for a non-invertible point */
 #define XI_MIN 1e-100          /* below this xi^2 approaches underflow */
+#define PARITY_MAX_SE 5.0      /* mc warns beyond this many SE of parity gap */
 
 static double g_gx[PANEL_NODES], g_gw[PANEL_NODES];
 static int g_quad_ready = 0;
@@ -741,7 +742,7 @@ static int mode_mc(int argc, char **argv)
     double dt = T / N, sdt = sqrt(dt);
     double disc = exp(-r * T);
     double sq1mr2 = sqrt(1.0 - rho * rho);
-    double csum = 0.0, csq = 0.0, psum = 0.0, psq = 0.0;
+    double csum = 0.0, csq = 0.0, psum = 0.0, psq = 0.0, dsum = 0.0, dsq = 0.0;
 
     for (long i = 0; i < paths; i++) {
         double lp = log(S), lm = log(S), vp = v0, vm = v0;
@@ -761,6 +762,8 @@ static int mode_mc(int argc, char **argv)
         csq += c * c;
         psum += p;
         psq += p * p;
+        dsum += c - p;
+        dsq += (c - p) * (c - p);
     }
     double cm = csum / paths, pm = psum / paths;
     double cse = sqrt(fmax(csq / paths - cm * cm, 0.0) / paths);
@@ -778,6 +781,18 @@ static int mode_mc(int argc, char **argv)
            cse > 0 ? (cm - fc) / cse : 0.0);
     printf("Put:  %.6f +/- %.6f (Fourier %.6f, diff %+.2f SE)\n", pm, pse, fp,
            pse > 0 ? (pm - fp) / pse : 0.0);
+
+    /* The log-Euler step has exactly the right conditional mean, so E[S_T] = F
+     * for any step size and a gap in put-call parity can only be sampling
+     * error. A large one means the sample has missed the tail of S_T that
+     * carries the call's value, and the call's SE understates its error. */
+    double dm = dsum / paths;
+    double dse = sqrt(fmax(dsq / paths - dm * dm, 0.0) / paths);
+    double gap = dm - (S * exp(-q * T) - K * disc);
+    if (fabs(gap) > PARITY_MAX_SE * dse + 1e-9 * S)
+        printf("warning: call - put misses parity by %+.4f (%.1f SE): the paths have missed "
+               "the tail of S_T, so the call and its SE are unreliable; the put is more robust\n",
+               gap, dse > 0 ? fabs(gap) / dse : 0.0);
     return EXIT_SUCCESS;
 }
 

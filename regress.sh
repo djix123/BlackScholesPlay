@@ -401,6 +401,17 @@ check_fail "var mc rejects too many time steps" \
 check_fail "heston mc rejects too many time steps" \
     "$HC" mc 100 100 1e8 0 0 0.04 2 0.05 0.3 -0.7 2
 
+# ---- mc warns when put-call parity shows the sample missed the tail ----------
+# Positive rho with high xi makes S_T so heavy-tailed that the call is far too
+# low while its SE looks fine. E[S_T] = F holds for any step size, so a parity
+# gap can only be sampling error.
+if BS_SEED=1 "$HC" mc 100 100 10 0.02 0 0.04 0.5 0.06 1.5 0.7 5000 | grep -q 'warning: call - put misses parity'; then
+    echo "PASS  mc warns on a heavy-tailed sample"
+else echo "FAIL  mc is silent on a heavy-tailed sample"; fails=$((fails + 1)); fi
+if BS_SEED=1 "$HC" mc 100 100 1 0.05 0.01 0.04 2 0.05 0.3 -0.7 20000 | grep -q 'warning'; then
+    echo "FAIL  mc warns on ordinary parameters"; fails=$((fails + 1))
+else echo "PASS  mc does not warn on ordinary parameters"; fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; else echo "$fails check(s) FAILED."; fi
 [ "$fails" -eq 0 ]

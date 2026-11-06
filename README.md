@@ -131,6 +131,11 @@ Implementation notes:
   the price is treated as failed: `price` and `mc` report an error, `fit` and
   `gen` treat the points as non-invertible.
 - Monte-Carlo runs are limited to 1e7 time steps per path.
+- `mc` warns if call minus put misses put-call parity by more than 5 SE. The
+  log-Euler step keeps `E[S_T] = F` for any step size, so such a gap is sampling
+  error: with positive `rho` and high `xi` the paths miss the tail of `S_T` that
+  carries the call's value, so the call and its SE are unreliable while the
+  put, which is bounded by the strike, stays usable.
 - Implied vols are inverted from the out-of-the-money option (call for
   `K >= F`, otherwise the put via parity), which stays well conditioned in
   the wings. A model price outside the invertible range gives no vol: it is
