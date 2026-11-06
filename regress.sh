@@ -337,6 +337,31 @@ if "$HC" gen "$TMP/noise.txt" 100 0.05 0.01 0.04 2 0.05 0.3 -0.7 9 3 0.5 1.5 0.0
     echo "PASS  gen names the krel=0.75 T=0.01 noise point as non-invertible"
 else echo "FAIL  gen does not report krel=0.75 T=0.01 as non-invertible"; fails=$((fails + 1)); fi
 
+# ---- Heston pricer, Lewis form (sharp feature at u = 0) ---------------------
+# The old P1/P2 form with uniform width-10 panels gave call 40.968498 and put
+# -4.150339 on the first case; even width-0.01 panels gave put -0.29 there.
+# Four of these five cases have kappa < rho*xi; the rho = -0.7 case was only
+# mildly off before (51.899300 against 51.8879). All of them are now priced by
+# the Lewis single-integral form with panels graded from PANEL_WIDTH0.
+for case in "100 100 30 0.02 0 0.04 0.1 0.1 1.2 0.7|52.5295|7.4106" \
+            "100 100 10 0.02 0 0.04 0.1 0.1 1.2 0.7|24.2685|6.1416" \
+            "100 100 30 0.02 0 0.04 0.1 0.1 1.2 -0.7|51.8879|6.7691" \
+            "100 100 10 0.02 0 0.04 0.5 0.06 1.5 0.7|27.4971|9.3701" \
+            "100 100 5 0.02 0 0.25 0.5 0.25 2 0.8|38.6427|29.1265"; do
+    args=${case%%|*}
+    rest=${case#*|}
+    ec=${rest%%|*}
+    ep=${rest#*|}
+    # shellcheck disable=SC2086
+    out=$("$HC" price $args)
+    c=$(echo "$out" | awk '/^Call:/{print $2}')
+    p=$(echo "$out" | awk '/^Call:/{print $4}')
+    check "Heston call $args" "$c" "$ec" 1e-3
+    check "Heston put  $args" "$p" "$ep" 1e-3
+    # the old quadrature produced a negative put on the first case
+    check_gt "Heston put non-negative $args" "$p" -1e-9
+done
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; else echo "$fails check(s) FAILED."; fi
 [ "$fails" -eq 0 ]
