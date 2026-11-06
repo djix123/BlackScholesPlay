@@ -299,6 +299,44 @@ else
     fails=$((fails + 1))
 fi
 
+# ---- Fourier noise floor: noise is not an implied vol ------------------------
+# At S=100 the Fourier call price carries absolute noise of about 1e-13, so an
+# OTM price below PRICE_NOISE_FLOOR * S = 1e-11 is noise, not a price. At
+# T=0.01 these strikes have prices at or below the noise level, yet used to
+# invert to garbage (K=50 gave 0.938465, K=62.5 gave 0.647547, K=75 gave
+# 0.384044) while K=70 and K=80 printed n/a, so gen accepted or rejected wing
+# points at random. All of them must now report n/a.
+for K in 50 62.5 70 75 80 120; do
+    out=$("$HC" price 100 $K 0.01 0.05 0.01 0.04 2 0.05 0.3 -0.7)
+    # 1 when a numeric vol was printed, 0 when the line says n/a
+    printed=$(echo "$out" | awk '/^Call:/{print ($7 ~ /^[-+]?[0-9.]+([eE][-+]?[0-9]+)?$/) ? 1 : 0}')
+    check_lt "wing K=$K (price is noise) implied vol is n/a" "$printed" 0.5
+done
+# The floor must not eat real points: these near-money strikes have OTM prices
+# of 6.1e-7, 7.8e-1 and 1.0e-8, far above 1e-11, and keep their vols.
+out=$("$HC" price 100 90 0.01 0.05 0.01 0.04 2 0.05 0.3 -0.7)
+check "wing K=90 implied vol still reported"  "$(echo "$out" | awk '/^Call:/{print $7}')" 0.22607 1e-4
+out=$("$HC" price 100 100 0.01 0.05 0.01 0.04 2 0.05 0.3 -0.7)
+check "wing K=100 implied vol still reported" "$(echo "$out" | awk '/^Call:/{print $7}')" 0.20014 1e-4
+out=$("$HC" price 100 110 0.01 0.05 0.01 0.04 2 0.05 0.3 -0.7)
+check "wing K=110 implied vol still reported" "$(echo "$out" | awk '/^Call:/{print $7}')" 0.17546 1e-4
+# A wing-heavy short-tenor grid is therefore unusable: gen refuses it and writes
+# nothing. The floor widens what gen rejects on this grid from 11 points to 16;
+# the newly caught ones are pure noise inverted to an arbitrary vol (krel=0.625
+# at T=0.01, a true price of ~1e-13, used to come out as 0.648).
+rm -f "$TMP/noise.txt"
+check_fail "gen refuses noise-dominated wing surface" \
+    "$HC" gen "$TMP/noise.txt" 100 0.05 0.01 0.04 2 0.05 0.3 -0.7 9 3 0.5 1.5 0.01 0.05
+[ ! -e "$TMP/noise.txt" ] && echo "PASS  gen wrote no file for the wing surface" ||
+    { echo "FAIL  gen left a file behind for the wing surface"; fails=$((fails + 1)); }
+# krel=0.75 (K=75) at T=0.01 is such a point: the pricer returns ~1e-14 of
+# noise there, which price mode used to print as vol 0.384044. gen must name it
+# among the non-invertible points it refuses to write.
+if "$HC" gen "$TMP/noise.txt" 100 0.05 0.01 0.04 2 0.05 0.3 -0.7 9 3 0.5 1.5 0.01 0.05 2>&1 >/dev/null |
+        grep -q 'krel=0.75 T=0.01'; then
+    echo "PASS  gen names the krel=0.75 T=0.01 noise point as non-invertible"
+else echo "FAIL  gen does not report krel=0.75 T=0.01 as non-invertible"; fails=$((fails + 1)); fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; else echo "$fails check(s) FAILED."; fi
 [ "$fails" -eq 0 ]

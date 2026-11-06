@@ -53,6 +53,14 @@
 #define UMAX_LIMIT 40000.0
 #define TAIL_TOL 1e-14
 
+/* The Fourier pricer's own absolute accuracy is around 1e-13 (per unit of
+ * spot), so a deep-out-of-the-money price smaller than PRICE_NOISE_FLOOR * S
+ * carries no information - it is quadrature noise, not a price. Inverting such
+ * a price reports an arbitrary implied vol (at K=75, T=0.01 the pricer returns
+ * only ~1e-14 of noise, which used to invert to 0.384), so those points are
+ * reported as non-invertible instead. */
+#define PRICE_NOISE_FLOOR 1e-13
+
 #define MAX_DIM 10000          /* max strikes or tenors in a surface file */
 #define MAX_POINTS 1000000     /* max ns*nt */
 #define VOL_PENALTY 1.0        /* objective error for a non-invertible point */
@@ -167,9 +175,12 @@ static double bs_price(int is_call, double S, double K, double T, double r, doub
  * side: the call for K >= F, otherwise the put obtained by put-call parity.
  * OTM options carry far more vega per unit of price error than deep-ITM calls,
  * so the inversion stays well conditioned in the wings.
- * Returns NaN if the price is outside the no-arbitrage range (<= 0 or at/above
- * the upper bound) or no vol in [1e-6, 10] reproduces it; callers must handle
- * that rather than receive a silently clamped vol. */
+ * Returns NaN if the price is not invertible: an OTM price below
+ * PRICE_NOISE_FLOOR * S is quadrature noise rather than a price (inverting it
+ * would report an arbitrary vol), a price <= 0 or at/above the upper bound is
+ * outside the no-arbitrage range, and a price no vol in [1e-6, 10] reproduces
+ * also gives NaN; callers must handle that rather than receive a silently
+ * clamped vol. */
 static double bs_otm_implied_vol(double call_price, double S, double K, double T,
                                  double r, double q)
 {
@@ -178,7 +189,7 @@ static double bs_otm_implied_vol(double call_price, double S, double K, double T
     int use_call = K >= F;
     double price = use_call ? call_price : call_price - S * dq + K * dr;
     double upper = use_call ? S * dq : K * dr;
-    if (!isfinite(price) || !(price > 0.0) || price >= upper)
+    if (!isfinite(price) || !(price > PRICE_NOISE_FLOOR * S) || price >= upper)
         return NAN;
 
     double lo = 1e-6, hi = 10.0;
